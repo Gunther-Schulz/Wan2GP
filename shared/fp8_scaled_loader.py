@@ -194,7 +194,11 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
                 
                 # Enhance existing forward method (preserves all mmgp functionality)
                 # PERFORMANCE: Pass scale_weight and base_dtype to closure (no module attributes needed)
-                if not hasattr(module, '_fp8_enhanced'):
+                # CRITICAL: Always patch if called after offload (which replaces forward methods)
+                # Check if our enhanced forward is still in place or if mmgp replaced it
+                needs_patching = not hasattr(module, '_fp8_enhanced') or not hasattr(module.forward, '__name__') or 'enhanced_forward' not in module.forward.__name__
+                
+                if needs_patching:
                     module.forward = create_enhanced_forward(module, scale_weight, base_dtype, name)
                     module._fp8_enhanced = True
                     # CRITICAL: Mark module with _lock_dtype so mmgp offload skips dtype assertions

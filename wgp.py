@@ -2915,9 +2915,20 @@ def load_models(model_type, override_profile = -1):
         # CRITICAL: Apply FP8 optimization AFTER offload.profile() to prevent mmgp from overwriting our forward methods
         print(f"\n🔍 DEBUG: Re-applying FP8 optimization AFTER offload setup...")
         from shared.fp8_scaled_loader import get_fp8_quantization_from_json, apply_fp8_optimization_to_model
+        import torch.nn as nn
         try:
             quantization = get_fp8_quantization_from_json(wan_model._model_quantization)
             if "fp8" in quantization:
+                # CRITICAL: Clear _fp8_enhanced flag to force re-patching (mmgp replaced our forward methods)
+                print(f"   Clearing _fp8_enhanced flags to force re-patching...")
+                for module in wan_model.model.modules():
+                    if isinstance(module, nn.Linear) and hasattr(module, '_fp8_enhanced'):
+                        delattr(module, '_fp8_enhanced')
+                if wan_model.model2 is not None:
+                    for module in wan_model.model2.modules():
+                        if isinstance(module, nn.Linear) and hasattr(module, '_fp8_enhanced'):
+                            delattr(module, '_fp8_enhanced')
+                
                 # Use local_model_file_list which contains actual local file paths (not URLs)
                 # local_model_file_list was created by get_local_model_filename() above
                 model_file = local_model_file_list[0]

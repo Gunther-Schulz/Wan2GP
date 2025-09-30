@@ -27,6 +27,19 @@ def apply_fp8_optimization_to_model(model, base_dtype, model_filename, device, q
     print(f"Base dtype: {base_dtype}")
     print(f"Quantization: {quantization}")
     
+    # Check if LoRAs detected - FP8 + LoRA is fundamentally incompatible
+    if hasattr(model, '_loras_active_adapters'):
+        active_loras = model._loras_active_adapters
+        if active_loras and len(active_loras) > 0:
+            print(f"\n❌ CRITICAL ERROR: FP8 models are INCOMPATIBLE with LoRAs!")
+            print(f"   {len(active_loras)} LoRAs detected: {active_loras}")
+            print(f"\n   REASON: LoRA weights are ALSO quantized to FP8")
+            print(f"   mmgp converts inputs to match LoRA dtype (FP8)")
+            print(f"   Dequantizing only base weights doesn't work")
+            print(f"\n   SOLUTION: Use regular Wan 2.2 (BF16/INT8) for LoRA support")
+            print(f"   Or use FP8 Dyno WITHOUT LoRAs (already optimized for 4 steps)")
+            raise RuntimeError("Cannot use FP8 models with LoRAs - they are fundamentally incompatible")
+    
     if not hasattr(torch, '_scaled_mm'):
         print("❌ torch._scaled_mm not available - skipping fp8 optimization")
         return False
@@ -71,6 +84,14 @@ def apply_fp8_optimization_to_model(model, base_dtype, model_filename, device, q
                     scale_weights[key] = tensor.to(dtype=torch.float32)
         
         print(f"   ✅ Selective load complete (loaded only {len(scale_weights)} scale weights, not full model)")
+        
+        # DEBUG: Show first few scale weights to verify they're reasonable
+        sample_keys = list(scale_weights.keys())[:3]
+        print(f"\n   📋 Sample scale weights (first 3):")
+        for key in sample_keys:
+            val = scale_weights[key]
+            print(f"      {key}: shape={val.shape}, value={val.item() if val.numel() == 1 else f'tensor[{val.numel()}]'}")
+            
     except Exception as e:
         print(f"❌ Failed to load scale weights: {e}")
         return False
@@ -118,7 +139,7 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
         scale_cache = {'weight': scale_weight, 'device': scale_weight.device}
         
         def enhanced_forward(input):
-            # CRITICAL: Handle ALL input shapes for FP8 weights
+            # Pure FP8 optimization (LoRAs blocked at load time)
             if is_fp8:
                 # Use cached GPU version if available
                 cached_weight = scale_cache['weight']
@@ -196,6 +217,7 @@ def apply_fp8_matmul(input, weight, bias, scale_weight, base_dtype, scale_cache)
         print(f"\n✅ FP8 Forward #1 - Confirming optimization active")
         print(f"   Input: {input.shape}, {input.dtype} on {input.device}")
         print(f"   Weight: {weight.dtype} on {weight.device}")
+        print(f"   Scale weight: {scale_weight.shape}, {scale_weight.dtype}, value={scale_weight.item() if scale_weight.numel() == 1 else 'tensor'}")
     
     input_shape = input.shape
     scale_input = torch.ones((), device=input.device, dtype=torch.float32)

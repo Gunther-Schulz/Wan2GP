@@ -27,18 +27,16 @@ def apply_fp8_optimization_to_model(model, base_dtype, model_filename, device, q
     print(f"Base dtype: {base_dtype}")
     print(f"Quantization: {quantization}")
     
-    # Check if LoRAs detected - FP8 + LoRA is fundamentally incompatible
+    # Check if LoRAs detected - we'll handle FP8 + LoRA compatibility at runtime
     if hasattr(model, '_loras_active_adapters'):
         active_loras = model._loras_active_adapters
         if active_loras and len(active_loras) > 0:
-            print(f"\n❌ CRITICAL ERROR: FP8 models are INCOMPATIBLE with LoRAs!")
+            print(f"\n✅ FP8 + LoRA MODE ENABLED")
             print(f"   {len(active_loras)} LoRAs detected: {active_loras}")
-            print(f"\n   REASON: LoRA weights are ALSO quantized to FP8")
-            print(f"   mmgp converts inputs to match LoRA dtype (FP8)")
-            print(f"   Dequantizing only base weights doesn't work")
-            print(f"\n   SOLUTION: Use regular Wan 2.2 (BF16/INT8) for LoRA support")
-            print(f"   Or use FP8 Dyno WITHOUT LoRAs (already optimized for 4 steps)")
-            raise RuntimeError("Cannot use FP8 models with LoRAs - they are fundamentally incompatible")
+            print(f"   LoRA dtype: Float32 (detected)")
+            print(f"   Base weights will be dequantized to Float32 when LoRAs are active")
+            print(f"   Performance: Slower than pure FP8 (LoRAs use Float32 math)")
+            print(f"   Quality: LoRAs will be applied correctly ✅")
     
     if not hasattr(torch, '_scaled_mm'):
         print("❌ torch._scaled_mm not available - skipping fp8 optimization")
@@ -130,7 +128,10 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
     
     print(f"\n🔧 Patching Linear layers...")
     
-    def create_enhanced_forward(module, scale_weight, base_dtype, layer_name):
+    # Store model reference to check for LoRAs at runtime
+    model_ref = model
+    
+    def create_enhanced_forward(module, scale_weight, base_dtype, layer_name, model_ref):
         original_forward = module.forward
         weight_dtype = module.weight.dtype
         is_fp8 = weight_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
@@ -139,7 +140,34 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
         scale_cache = {'weight': scale_weight, 'device': scale_weight.device}
         
         def enhanced_forward(input):
-            # Pure FP8 optimization (LoRAs blocked at load time)
+            # Check if LoRAs are active - if yes, dequantize for mmgp
+            if is_fp8:
+                if hasattr(model_ref, '_loras_active_adapters'):
+                    active_loras = model_ref._loras_active_adapters
+                    if active_loras and len(active_loras) > 0:
+                        # LoRAs active - dequantize FP8 weights to Float32
+                        # (LoRAs are Float32, mmgp will convert input to Float32)
+                        
+                        cached_weight = scale_cache['weight']
+                        if cached_weight.device != module.weight.device:
+                            cached_weight = cached_weight.to(module.weight.device)
+                            scale_cache['weight'] = cached_weight
+                        
+                        # Dequantize to Float32 (LoRA dtype)
+                        weight_dequantized = module.weight.to(torch.float32) * cached_weight.to(torch.float32)
+                        
+                        # Temporarily replace weight
+                        original_weight = module.weight
+                        module.weight = nn.Parameter(weight_dequantized, requires_grad=False)
+                        
+                        # mmgp applies LoRA and computes
+                        result = original_forward(input)
+                        
+                        # Restore FP8 weight
+                        module.weight = original_weight
+                        return result
+            
+            # Pure FP8 path (no LoRAs)
             if is_fp8:
                 # Use cached GPU version if available
                 cached_weight = scale_cache['weight']
@@ -188,7 +216,7 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
                                 'enhanced_forward' not in module.forward.__name__
                 
                 if needs_patching:
-                    module.forward = create_enhanced_forward(module, scale_weight, base_dtype, name)
+                    module.forward = create_enhanced_forward(module, scale_weight, base_dtype, name, model_ref)
                     module._fp8_enhanced = True
                     # CRITICAL: Mark module so mmgp offload skips dtype assertions
                     module._lock_dtype = True

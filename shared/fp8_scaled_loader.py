@@ -81,41 +81,52 @@ def apply_fp8_optimization_to_model(model, base_dtype, model_filename, device, q
         print(f"❌ FP8 quantization {quantization} detected but not scaled - no optimization needed")
         return False
     
-    # PERFORMANCE FIX: Extract scale weights directly from model parameters (no state_dict call!)
-    # This leverages Wan2GP's architecture efficiently without ComfyUI overhead
-    # CRITICAL: Let offload system manage device placement - don't force CUDA here!
-    print(f"\n📊 Extracting scale weights from model parameters...")
-    print(f"   Total parameters in model: {sum(1 for _ in model.named_parameters())}")
+    # CRITICAL: Scale weights are in the safetensors file but NOT as model parameters!
+    # OPTIMIZATION: Use safe_open to selectively load ONLY scale weights (not entire 14GB model!)
+    print(f"\n📊 Extracting scale weights from safetensors file...")
+    print(f"   Model file: {model_filename}")
     
-    # DEBUG: Print ALL parameter names to see what's actually there
-    all_params = list(model.named_parameters())
-    print(f"   First 10 parameter names:")
-    for name, param in all_params[:10]:
-        print(f"     - {name}: dtype={param.dtype}, shape={param.shape}")
+    from safetensors import safe_open
+    import os
     
+    # Handle both single file and list of files
+    if isinstance(model_filename, list):
+        model_file = model_filename[0] if len(model_filename) > 0 else None
+    else:
+        model_file = model_filename
+    
+    if not model_file or not os.path.exists(model_file):
+        print(f"❌ Model file not found: {model_file}")
+        return False
+    
+    print(f"   Selectively loading scale weights (not full model)...")
+    # PERFORMANCE: Use safe_open to load ONLY scale weights without loading entire state_dict
+    # This is MUCH faster and uses minimal memory vs loading full 14GB model
     scale_weights = {}
-    param_devices = {}
-    param_count = 0
-    for name, param in model.named_parameters():
-        param_count += 1
-        # Check various possible scale weight naming patterns
-        if "scale_weight" in name.lower() or name.endswith(".scale") or "scaled_fp8" in name:
-            param_devices[name] = str(param.device)
-            scale_weights[name] = param.detach().clone().to(dtype=torch.float32)
-            print(f"  ✅ Found scale weight: {name}: device={param.device}, dtype={param.dtype}")
-    
-    print(f"   Checked {param_count} parameters total")
+    try:
+        with safe_open(model_file, framework="pt", device="cpu") as f:
+            total_keys = len(f.keys())
+            print(f"   File contains {total_keys} tensors total")
+            
+            for key in f.keys():
+                if key.endswith(".scale_weight"):
+                    tensor = f.get_tensor(key)
+                    # CRITICAL: Keep as float32, let offload manage device placement
+                    scale_weights[key] = tensor.to(dtype=torch.float32)
+                    print(f"  ✅ Found scale weight: {key}: dtype={tensor.dtype} -> float32, shape={tensor.shape}")
+        
+        print(f"   ✅ Selective load complete (loaded only {len(scale_weights)} scale weights, not full model)")
+    except Exception as e:
+        print(f"❌ Failed to load scale weights: {e}")
+        return False
     
     if len(scale_weights) == 0:
-        print(f"❌ No scale weights found for quantization {quantization}")
-        print(f"   This might mean:")
-        print(f"   1. Scale weights are in state_dict but not as parameters")
-        print(f"   2. They have a different naming convention")
-        print(f"   3. The model format is different than expected")
+        print(f"❌ No scale weights found in state_dict for quantization {quantization}")
+        print(f"   Checked all keys ending with '.scale_weight'")
         return False
     
     print(f"\n✅ Found {len(scale_weights)} scale weights")
-    print(f"   Device distribution: {set(param_devices.values())}")
+    print(f"   All loaded on CPU (device=cpu)")
     
     # Use our efficient approach that leverages Wan2GP's existing infrastructure
     optimized_count = apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights)

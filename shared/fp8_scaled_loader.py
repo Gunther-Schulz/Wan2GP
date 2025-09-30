@@ -184,18 +184,18 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
 
 def apply_fp8_matmul(input, weight, bias, scale_weight, base_dtype, scale_cache):
     """
-    FP8 matmul with ALL fixes: device caching, fp8 input handling, debug.
+    FP8 matmul with ALL fixes: device caching, fp8 input handling, minimal debug.
     """
     global _fp8_forward_count, _fp8_device_transfers
     _fp8_forward_count += 1
     
-    debug_this_call = (_fp8_forward_count % 100 == 1)
+    # Only debug first call to confirm FP8 is working
+    debug_this_call = (_fp8_forward_count == 1)
     
     if debug_this_call:
-        print(f"\n🔍 FP8 Forward #{_fp8_forward_count} - Device Check:")
-        print(f"   input: device={input.device}, shape={input.shape}, dtype={input.dtype}")
-        print(f"   weight: device={weight.device}, dtype={weight.dtype}")
-        print(f"   scale_weight: device={scale_weight.device}, dtype={scale_weight.dtype}")
+        print(f"\n✅ FP8 Forward #1 - Confirming optimization active")
+        print(f"   Input: {input.shape}, {input.dtype} on {input.device}")
+        print(f"   Weight: {weight.dtype} on {weight.device}")
     
     input_shape = input.shape
     scale_input = torch.ones((), device=input.device, dtype=torch.float32)
@@ -203,9 +203,6 @@ def apply_fp8_matmul(input, weight, bias, scale_weight, base_dtype, scale_cache)
     # CRITICAL: Cache GPU scale_weight to avoid repeated transfers
     if scale_weight.device != input.device:
         _fp8_device_transfers += 1
-        if debug_this_call:
-            print(f"   ⚠️  DEVICE TRANSFER NEEDED: {scale_weight.device} -> {input.device}")
-            print(f"   Total transfers so far: {_fp8_device_transfers}")
         scale_weight = scale_weight.to(input.device)
         # Update cache with GPU version
         scale_cache['weight'] = scale_weight
@@ -213,8 +210,6 @@ def apply_fp8_matmul(input, weight, bias, scale_weight, base_dtype, scale_cache)
     
     # CRITICAL: Check if input is already fp8 (skip clamp - NotImplementedError!)
     if input.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-        if debug_this_call:
-            print(f"   ℹ️  Input already fp8, skipping clamp/convert")
         input_fp8 = input.reshape(-1, input_shape[2]).contiguous()
     else:
         # Standard path: clamp then convert

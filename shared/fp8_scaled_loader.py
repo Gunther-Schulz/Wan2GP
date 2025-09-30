@@ -85,19 +85,33 @@ def apply_fp8_optimization_to_model(model, base_dtype, model_filename, device, q
     # This leverages Wan2GP's architecture efficiently without ComfyUI overhead
     # CRITICAL: Let offload system manage device placement - don't force CUDA here!
     print(f"\n📊 Extracting scale weights from model parameters...")
+    print(f"   Total parameters in model: {sum(1 for _ in model.named_parameters())}")
+    
+    # DEBUG: Print ALL parameter names to see what's actually there
+    all_params = list(model.named_parameters())
+    print(f"   First 10 parameter names:")
+    for name, param in all_params[:10]:
+        print(f"     - {name}: dtype={param.dtype}, shape={param.shape}")
+    
     scale_weights = {}
     param_devices = {}
+    param_count = 0
     for name, param in model.named_parameters():
-        if name.endswith(".scale_weight"):
-            # CRITICAL FIX: Keep on current device (CPU/disk with writable_tensors=False)
-            # Offload system will move to CUDA when needed during forward pass
-            # Only convert dtype, don't force device transfer!
+        param_count += 1
+        # Check various possible scale weight naming patterns
+        if "scale_weight" in name.lower() or name.endswith(".scale") or "scaled_fp8" in name:
             param_devices[name] = str(param.device)
             scale_weights[name] = param.detach().clone().to(dtype=torch.float32)
-            print(f"  • {name}: device={param.device}, dtype={param.dtype} -> {scale_weights[name].dtype}")
+            print(f"  ✅ Found scale weight: {name}: device={param.device}, dtype={param.dtype}")
+    
+    print(f"   Checked {param_count} parameters total")
     
     if len(scale_weights) == 0:
         print(f"❌ No scale weights found for quantization {quantization}")
+        print(f"   This might mean:")
+        print(f"   1. Scale weights are in state_dict but not as parameters")
+        print(f"   2. They have a different naming convention")
+        print(f"   3. The model format is different than expected")
         return False
     
     print(f"\n✅ Found {len(scale_weights)} scale weights")

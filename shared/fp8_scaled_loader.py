@@ -57,42 +57,64 @@ def apply_fp8_optimization_to_model(model, base_dtype, model_filename, device, q
         device: Target device
         quantization: Detected quantization type (e.g., "fp8_e4m3fn_scaled")
     """
+    import time
+    start_time = time.time()
+    
+    print(f"\n{'='*60}")
+    print(f"FP8 OPTIMIZATION DEBUG - Starting")
+    print(f"{'='*60}")
+    print(f"Model filename: {model_filename}")
+    print(f"Target device: {device}")
+    print(f"Base dtype: {base_dtype}")
+    print(f"Quantization: {quantization}")
+    
     # Check if torch._scaled_mm is available
     if not hasattr(torch, '_scaled_mm'):
-        print("torch._scaled_mm not available - skipping fp8 optimization")
+        print("❌ torch._scaled_mm not available - skipping fp8 optimization")
         return False
     
     if not quantization or "fp8" not in quantization:
+        print(f"❌ No fp8 quantization detected: {quantization}")
         return False
     
     if "scaled" not in quantization:
-        print(f"FP8 quantization {quantization} detected but not scaled - no optimization needed")
+        print(f"❌ FP8 quantization {quantization} detected but not scaled - no optimization needed")
         return False
     
     # PERFORMANCE FIX: Extract scale weights directly from model parameters (no state_dict call!)
     # This leverages Wan2GP's architecture efficiently without ComfyUI overhead
     # CRITICAL: Let offload system manage device placement - don't force CUDA here!
+    print(f"\n📊 Extracting scale weights from model parameters...")
     scale_weights = {}
+    param_devices = {}
     for name, param in model.named_parameters():
         if name.endswith(".scale_weight"):
             # CRITICAL FIX: Keep on current device (CPU/disk with writable_tensors=False)
             # Offload system will move to CUDA when needed during forward pass
             # Only convert dtype, don't force device transfer!
+            param_devices[name] = str(param.device)
             scale_weights[name] = param.detach().clone().to(dtype=torch.float32)
+            print(f"  • {name}: device={param.device}, dtype={param.dtype} -> {scale_weights[name].dtype}")
     
     if len(scale_weights) == 0:
-        print(f"No scale weights found for quantization {quantization}")
+        print(f"❌ No scale weights found for quantization {quantization}")
         return False
     
-    print(f"Applying fp8 optimization using {len(scale_weights)} scale weights for {quantization}...")
+    print(f"\n✅ Found {len(scale_weights)} scale weights")
+    print(f"   Device distribution: {set(param_devices.values())}")
     
     # Use our efficient approach that leverages Wan2GP's existing infrastructure
     optimized_count = apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights)
     
+    elapsed = time.time() - start_time
     if optimized_count > 0:
-        print(f"Successfully optimized {optimized_count} Linear layers for fp8")
+        print(f"\n✅ Successfully optimized {optimized_count} Linear layers for fp8")
+        print(f"⏱️  Total setup time: {elapsed:.3f}s")
+        print(f"{'='*60}\n")
         return True
     
+    print(f"❌ No layers optimized")
+    print(f"{'='*60}\n")
     return False
 
 
@@ -109,14 +131,21 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
     Simplified fp8 optimization that leverages our existing infrastructure.
     Instead of complex layer patching, we enhance our existing Linear layers.
     """
+    import time
+    start_time = time.time()
     optimized_count = 0
+    skipped_count = 0
+    
+    print(f"\n🔧 Patching Linear layers...")
     
     # Create shared enhanced forward function to avoid recreating for each module
-    def create_enhanced_forward(module, scale_weight, base_dtype):
+    def create_enhanced_forward(module, scale_weight, base_dtype, layer_name):
         original_forward = module.forward
         # PERFORMANCE FIX: Cache weight dtype at setup time (not every forward pass!)
         weight_dtype = module.weight.dtype
         is_fp8 = weight_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+        
+        print(f"   • {layer_name}: weight_dtype={weight_dtype}, is_fp8={is_fp8}, scale_weight_device={scale_weight.device}")
         
         def enhanced_forward(input):
             # OPTIMIZED: Only check input shape - dtype and scale_weight checked at setup
@@ -144,10 +173,15 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
                 # Enhance existing forward method (preserves all mmgp functionality)
                 # PERFORMANCE: Pass scale_weight and base_dtype to closure (no module attributes needed)
                 if not hasattr(module, '_fp8_enhanced'):
-                    module.forward = create_enhanced_forward(module, scale_weight, base_dtype)
+                    module.forward = create_enhanced_forward(module, scale_weight, base_dtype, name)
                     module._fp8_enhanced = True
-                
-                optimized_count += 1
+                    optimized_count += 1
+                else:
+                    skipped_count += 1
+    
+    elapsed = time.time() - start_time
+    print(f"\n✅ Patched {optimized_count} layers ({skipped_count} already patched)")
+    print(f"⏱️  Patching time: {elapsed:.3f}s")
     
     return optimized_count
 
@@ -155,8 +189,24 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
 # Removed duplicate create_enhanced_linear_forward - integrated into apply_fp8_optimization_to_model_simple
 
 
+# Global debug counter for fp8 forward passes
+_fp8_forward_count = 0
+_fp8_device_transfers = 0
+
 def apply_fp8_matmul(input, weight, bias, scale_weight, base_dtype):
     """Optimized fp8 matrix multiplication - minimal tensor creation, leverages existing infrastructure."""
+    global _fp8_forward_count, _fp8_device_transfers
+    _fp8_forward_count += 1
+    
+    # Debug logging every 100 calls
+    debug_this_call = (_fp8_forward_count % 100 == 1)
+    
+    if debug_this_call:
+        print(f"\n🔍 FP8 Forward #{_fp8_forward_count} - Device Check:")
+        print(f"   input: device={input.device}, shape={input.shape}, dtype={input.dtype}")
+        print(f"   weight: device={weight.device}, dtype={weight.dtype}")
+        print(f"   scale_weight: device={scale_weight.device}, dtype={scale_weight.dtype}")
+    
     input_shape = input.shape
     
     # Optimized: reuse input device, avoid creating new tensors when possible
@@ -165,6 +215,10 @@ def apply_fp8_matmul(input, weight, bias, scale_weight, base_dtype):
     # CRITICAL: Move scale_weight to input device only if needed (offload system compatibility)
     # Check device to avoid unnecessary transfers
     if scale_weight.device != input.device:
+        _fp8_device_transfers += 1
+        if debug_this_call:
+            print(f"   ⚠️  DEVICE TRANSFER NEEDED: {scale_weight.device} -> {input.device}")
+            print(f"   Total transfers so far: {_fp8_device_transfers}")
         scale_weight = scale_weight.to(input.device)
     
     # Streamlined fp8 conversion (in-place clamping for memory efficiency)

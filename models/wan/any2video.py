@@ -85,8 +85,15 @@ class WanAny2V:
         self.param_dtype = config.param_dtype
         self.model_def = model_def
         
-        # Store quantization for later use - ComfyUI approach (detect after loading)
-        self._model_quantization = model_def.get("model", {}).get("quantization", None) if model_def else None
+        # Store quantization for later use
+        # CRITICAL FIX: model_def is flattened, quantization is at root level, not under "model" key
+        self._model_quantization = model_def.get("quantization", None) if model_def else None
+        
+        print(f"\n{'='*60}")
+        print(f"🔍 DEBUG: Quantization Detection")
+        print(f"{'='*60}")
+        print(f"   Detected quantization: {self._model_quantization}")
+        print(f"{'='*60}\n")
         self.model2 = None
         self.transformer_switch = model_def.get("URLs2", None) is not None
         self.text_encoder = T5EncoderModel(
@@ -157,58 +164,131 @@ class WanAny2V:
                     raise Exception("Shared and non shared modules at the same time across multipe models is not supported")
                 
                 if 0 in submodel_no_list[2:]:
+                    print(f"\n{'='*60}")
+                    print(f"🔍 DEBUG: Loading dual models with SHARED modules")
+                    print(f"{'='*60}")
+                    print(f"   Model 1 file: {model_filename[:1]}")
+                    print(f"   Model 2 file: {model_filename[1:2]}")
+                    print(f"   Shared modules: {model_filename[2:]}")
+                    
                     shared_modules= {}
+                    print(f"   Loading model1 with shared modules...")
                     self.model = offload.fast_load_transformers_model(model_filename[:1], modules = model_filename[2:], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath,  return_shared_modules= shared_modules)
+                    print(f"   ✅ Model1 loaded")
+                    
+                    print(f"   Loading model2 with shared modules...")
                     self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = shared_modules, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+                    print(f"   ✅ Model2 loaded")
                     shared_modules = None
                 else:
+                    print(f"\n{'='*60}")
+                    print(f"🔍 DEBUG: Loading dual models with SEPARATE modules")
+                    print(f"{'='*60}")
                     modules_for_1 =[ file_name for file_name, submodel_no in zip(model_filename[2:],submodel_no_list[2:] ) if submodel_no ==1 ]
                     modules_for_2 =[ file_name for file_name, submodel_no in zip(model_filename[2:],submodel_no_list[2:] ) if submodel_no ==2 ]
+                    print(f"   Model 1 file: {model_filename[:1]}")
+                    print(f"   Model 1 modules: {modules_for_1}")
+                    print(f"   Model 2 file: {model_filename[1:2]}")
+                    print(f"   Model 2 modules: {modules_for_2}")
+                    
+                    print(f"   Loading model1...")
                     self.model = offload.fast_load_transformers_model(model_filename[:1], modules = modules_for_1, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+                    print(f"   ✅ Model1 loaded")
+                    
+                    print(f"   Loading model2...")
                     self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = modules_for_2, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+                    print(f"   ✅ Model2 loaded")
 
             else:
+                print(f"\n{'='*60}")
+                print(f"🔍 DEBUG: Loading single model (no dual architecture)")
+                print(f"{'='*60}")
+                print(f"   Model file: {model_filename}")
                 self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+                print(f"   ✅ Model loaded")
         
 
         if self.model is not None:
+            print(f"\n{'='*60}")
+            print(f"🔍 DEBUG: Starting model1 setup")
+            print(f"{'='*60}")
+            print(f"   Mixed precision: {mixed_precision_transformer}")
+            print(f"   Target dtype: {dtype}")
+            print(f"   FP8 quantization: {self._model_quantization}")
+            
+            print(f"   Locking layer dtypes...")
             self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
+            
             # CRITICAL: Skip change_dtype for fp8 models to preserve fp8 weight dtypes!
             if not (self._model_quantization and "fp8" in self._model_quantization):
+                print(f"   Changing dtype for model...")
                 offload.change_dtype(self.model, dtype, True)
+            else:
+                print(f"   Skipping dtype change (FP8 model)")
+                # CRITICAL: Mark model as FP8 so offload knows to skip dtype conversion
+                self.model._is_fp8_quantized = True
+            
+            print(f"\n🔍 DEBUG: About to apply FP8 optimization to model1")
+            print(f"   Model quantization: {self._model_quantization}")
+            print(f"   Model filename: {model_filename}")
             
             # Apply fp8 optimization using JSON-only approach (PERFORMANCE FIX)
             from shared.fp8_scaled_loader import get_fp8_quantization_from_json, apply_fp8_optimization_to_model
             try:
                 # Get quantization from JSON config ONLY - no expensive state_dict scanning
                 quantization = get_fp8_quantization_from_json(self._model_quantization)
+                print(f"   Detected quantization: {quantization}")
                 
                 if "fp8" in quantization:
                     model_file = model_filename[0] if isinstance(model_filename, list) else model_filename
+                    print(f"   Calling apply_fp8_optimization_to_model...")
                     apply_fp8_optimization_to_model(self.model, dtype, model_file, self.device, quantization)
-                    print(f"Applied fp8 optimization for quantization: {quantization}")
+                    print(f"✅ Applied fp8 optimization for quantization: {quantization}")
+                else:
+                    print(f"   Skipping FP8 optimization (not fp8)")
             except Exception as e:
-                print(f"FP8 optimization check failed (non-critical): {e}")
+                print(f"❌ FP8 optimization check failed: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            print(f"🔍 DEBUG: Setting model1 to eval mode...")
             self.model.eval().requires_grad_(False)
+            print(f"✅ Model1 setup complete")
         if self.model2 is not None:
+            print(f"\n🔍 DEBUG: Setting up model2 (dual model architecture)")
             self.model2.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
             # CRITICAL: Skip change_dtype for fp8 models to preserve fp8 weight dtypes!
             if not (self._model_quantization and "fp8" in self._model_quantization):
+                print(f"   Changing dtype for model2...")
                 offload.change_dtype(self.model2, dtype, True)
+            else:
+                print(f"   Skipping dtype change for model2 (FP8 model)")
+                # CRITICAL: Mark model as FP8 so offload knows to skip dtype conversion
+                self.model2._is_fp8_quantized = True
             
+            print(f"🔍 DEBUG: About to apply FP8 optimization to model2")
             # Apply fp8 optimization using JSON-only approach (PERFORMANCE FIX)
             from shared.fp8_scaled_loader import get_fp8_quantization_from_json, apply_fp8_optimization_to_model
             try:
                 # Get quantization from JSON config ONLY - no expensive state_dict scanning
                 quantization = get_fp8_quantization_from_json(self._model_quantization)
+                print(f"   Detected quantization: {quantization}")
                 
                 if "fp8" in quantization:
                     model_file = model_filename[1] if isinstance(model_filename, list) and len(model_filename) > 1 else model_filename
+                    print(f"   Calling apply_fp8_optimization_to_model for model2...")
                     apply_fp8_optimization_to_model(self.model2, dtype, model_file, self.device, quantization)
-                    print(f"Applied fp8 optimization for model2 quantization: {quantization}")
+                    print(f"✅ Applied fp8 optimization for model2 quantization: {quantization}")
+                else:
+                    print(f"   Skipping FP8 optimization for model2 (not fp8)")
             except Exception as e:
-                print(f"FP8 optimization check failed for model2 (non-critical): {e}")
+                print(f"❌ FP8 optimization check failed for model2: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            print(f"🔍 DEBUG: Setting model2 to eval mode...")
             self.model2.eval().requires_grad_(False)
+            print(f"✅ Model2 setup complete")
 
         if module_source is not None:
             save_model(self.model, model_type, dtype, None, is_module=True, filter=list(torch_load_file(module_source)), module_source_no=1)
@@ -864,9 +944,13 @@ class WanAny2V:
         if guide_phases > 1: denoising_extra = f"Phase 1/{guide_phases} High Noise" if self.model2 is not None else f"Phase 1/{guide_phases}"
         def update_guidance(step_no, t, guide_scale, new_guide_scale, guidance_switch_done, switch_threshold, trans, phase_no, denoising_extra):
             if guide_phases >= phase_no and not guidance_switch_done and t <= switch_threshold:
-                if model_switch_phase == phase_no-1 and self.model2 is not None: trans = self.model2
+                if model_switch_phase == phase_no-1 and self.model2 is not None:
+                    print(f"\n🔄 MODEL SWITCH at step {step_no}, timestep {t}")
+                    print(f"   Switching from model1 to model2 (High Noise -> Low Noise)")
+                    trans = self.model2
                 guide_scale, guidance_switch_done = new_guide_scale, True
                 denoising_extra = f"Phase {phase_no}/{guide_phases} {'Low Noise' if trans == self.model2 else 'High Noise'}" if self.model2 is not None else f"Phase {phase_no}/{guide_phases}"
+                print(f"   Phase change: {denoising_extra}, guidance: {guide_scale}")
                 callback(step_no-1, denoising_extra = denoising_extra)
             return guide_scale, guidance_switch_done, trans, denoising_extra
         update_loras_slists(self.model, loras_slists, len(original_timesteps), phase_switch_step= phase_switch_step, phase_switch_step2= phase_switch_step2)
@@ -895,10 +979,23 @@ class WanAny2V:
 
         # denoising
         trans = self.model
+        import time as time_module
+        step_times = []
+        
+        print(f"\n{'='*60}")
+        print(f"STARTING INFERENCE - {len(timesteps)} steps")
+        print(f"Using dual models: {self.model2 is not None}")
+        print(f"{'='*60}\n")
+        
         for i, t in enumerate(tqdm(timesteps)):
+            step_start = time_module.time()
+            
             guide_scale, guidance_switch_done, trans, denoising_extra = update_guidance(i, t, guide_scale, guide2_scale, guidance_switch_done, switch_threshold, trans, 2, denoising_extra)
             guide_scale, guidance_switch2_done, trans, denoising_extra = update_guidance(i, t, guide_scale, guide3_scale, guidance_switch2_done, switch2_threshold, trans, 3, denoising_extra)
             offload.set_step_no_for_lora(trans, start_step_no + i)
+            
+            if i % 10 == 0:
+                print(f"\n⏱️  Step {i}/{len(timesteps)}: timestep={t}, using_model2={trans == self.model2}")
             timestep = torch.stack([t])
 
             if timestep_injection:

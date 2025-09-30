@@ -2903,8 +2903,15 @@ def load_models(model_type, override_profile = -1):
         setup_prompt_enhancer(pipe, kwargs)
     loras_transformer = ["transformer"]
     if "transformer2" in pipe:
-        loras_transformer += ["transformer2"]        
-    offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
+        loras_transformer += ["transformer2"]
+    
+    # CRITICAL FIX: For FP8 models, don't pass convertWeightsFloatTo (weights are already fp8, not float)
+    is_fp8_model = model_def.get("quantization", "").startswith("fp8") if model_def else False
+    if is_fp8_model:
+        print(f"🔍 DEBUG: FP8 model detected, skipping dtype conversion in offload.profile")
+        offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient, **kwargs)
+    else:
+        offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
     if len(args.gpu) > 0:
         torch.set_default_device(args.gpu)
     transformer_type = model_type

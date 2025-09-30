@@ -84,6 +84,9 @@ class WanAny2V:
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
         self.model_def = model_def
+        
+        # Store quantization for later use - ComfyUI approach (detect after loading)
+        self._model_quantization = model_def.get("model", {}).get("quantization", None) if model_def else None
         self.model2 = None
         self.transformer_switch = model_def.get("URLs2", None) is not None
         self.text_encoder = T5EncoderModel(
@@ -138,6 +141,7 @@ class WanAny2V:
             self.model = offload.fast_load_transformers_model(model_filename[:1] + [module_source], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
         if module_source2 is not None:
             self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [module_source2], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+            
         if source is not None:
             self.model = offload.fast_load_transformers_model(source, modelClass=WanModel, writable_tensors= False, forcedConfigPath= base_config_file)
         if source2 is not None:
@@ -147,6 +151,7 @@ class WanAny2V:
             from wgp import save_model
             from mmgp.safetensors2 import torch_load_file
         else:
+                
             if self.transformer_switch:
                 if 0 in submodel_no_list[2:] and 1 in submodel_no_list[2:]:
                     raise Exception("Shared and non shared modules at the same time across multipe models is not supported")
@@ -168,11 +173,41 @@ class WanAny2V:
 
         if self.model is not None:
             self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
-            offload.change_dtype(self.model, dtype, True)
+            # CRITICAL: Skip change_dtype for fp8 models to preserve fp8 weight dtypes!
+            if not (self._model_quantization and "fp8" in self._model_quantization):
+                offload.change_dtype(self.model, dtype, True)
+            
+            # Apply fp8 optimization using JSON-only approach (PERFORMANCE FIX)
+            from shared.fp8_scaled_loader import get_fp8_quantization_from_json, apply_fp8_optimization_to_model
+            try:
+                # Get quantization from JSON config ONLY - no expensive state_dict scanning
+                quantization = get_fp8_quantization_from_json(self._model_quantization)
+                
+                if "fp8" in quantization:
+                    model_file = model_filename[0] if isinstance(model_filename, list) else model_filename
+                    apply_fp8_optimization_to_model(self.model, dtype, model_file, self.device, quantization)
+                    print(f"Applied fp8 optimization for quantization: {quantization}")
+            except Exception as e:
+                print(f"FP8 optimization check failed (non-critical): {e}")
             self.model.eval().requires_grad_(False)
         if self.model2 is not None:
             self.model2.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
-            offload.change_dtype(self.model2, dtype, True)
+            # CRITICAL: Skip change_dtype for fp8 models to preserve fp8 weight dtypes!
+            if not (self._model_quantization and "fp8" in self._model_quantization):
+                offload.change_dtype(self.model2, dtype, True)
+            
+            # Apply fp8 optimization using JSON-only approach (PERFORMANCE FIX)
+            from shared.fp8_scaled_loader import get_fp8_quantization_from_json, apply_fp8_optimization_to_model
+            try:
+                # Get quantization from JSON config ONLY - no expensive state_dict scanning
+                quantization = get_fp8_quantization_from_json(self._model_quantization)
+                
+                if "fp8" in quantization:
+                    model_file = model_filename[1] if isinstance(model_filename, list) and len(model_filename) > 1 else model_filename
+                    apply_fp8_optimization_to_model(self.model2, dtype, model_file, self.device, quantization)
+                    print(f"Applied fp8 optimization for model2 quantization: {quantization}")
+            except Exception as e:
+                print(f"FP8 optimization check failed for model2 (non-critical): {e}")
             self.model2.eval().requires_grad_(False)
 
         if module_source is not None:
@@ -199,6 +234,8 @@ class WanAny2V:
         if hasattr(self.model, "face_adapter"):
             self.adapt_animate_model(self.model)
             if self.model2 is not None: self.adapt_animate_model(self.model2)
+        
+        # FP8 optimization complete - ComfyUI approach eliminates need for global context
         
         self.num_timesteps = 1000 
         self.use_timestep_transform = True 

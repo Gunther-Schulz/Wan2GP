@@ -1,0 +1,22 @@
+{
+	"model":
+	{
+		"name": "Wan2.2 Text2video 14B FP8 Dyno",
+		"architecture" : "t2v",
+		"description": "Wan 2.2 Text 2 Video model with fp8 scaled dyno-lightx2v high noise model (4 steps) combined with fp8 scaled low noise model",
+		"URLs": [
+			"https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/T2V/Wan2_2-T2V-A14B-HIGH_4_steps-250928-dyno-lightx2v_fp8_e4m3fn_scaled_KJ.safetensors"
+		],
+		"URLs2": [
+			"https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/T2V/Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors"
+		],
+		"group": "wan2_2",
+		"quantization": "fp8_e4m3fn_scaled"
+	},
+	"guidance_phases": 2,
+	"switch_threshold" : 875,
+	"guidance_scale" : 4,
+	"guidance2_scale" : 3,
+	"flow_shift" : 12
+	
+}

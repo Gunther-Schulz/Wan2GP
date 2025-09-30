@@ -9,6 +9,8 @@ import sys
 import threading
 import argparse
 from mmgp import offload, safetensors2, profile_type 
+# Import fp8_scaled_loader to monkey patch safetensors2 for Kijai's fp8_scaled models
+import shared.fp8_scaled_loader
 try:
     import triton
 except ImportError:
@@ -2043,6 +2045,12 @@ def get_model_filename(model_type, quantization ="int8", dtype_policy = "", modu
         if isinstance(URLs, str):
             if len(stack) > 10: raise Exception(f"Circular Reference in Model {key_name} dependencies: {stack}")
             return get_model_filename(URLs, quantization=quantization, dtype_policy=dtype_policy, submodel_no = submodel_no, stack = stack + [URLs])
+        
+        # Check if model specifies its own quantization (for fp8 models, etc.)
+        model_quantization = model_def.get("model", {}).get("quantization", None)
+        if model_quantization and quantization == "int8":
+            quantization = model_quantization
+            print(f"Using model-specified quantization: {quantization} for {model_type}")
 
     # choices = [ ("ckpts/" + os.path.basename(path) if path.startswith("http") else path)  for path in URLs ]
     choices = URLs

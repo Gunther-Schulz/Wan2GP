@@ -113,7 +113,6 @@ def apply_fp8_optimization_to_model(model, base_dtype, model_filename, device, q
                     tensor = f.get_tensor(key)
                     # CRITICAL: Keep as float32, let offload manage device placement
                     scale_weights[key] = tensor.to(dtype=torch.float32)
-                    print(f"  ✅ Found scale weight: {key}: dtype={tensor.dtype} -> float32, shape={tensor.shape}")
         
         print(f"   ✅ Selective load complete (loaded only {len(scale_weights)} scale weights, not full model)")
     except Exception as e:
@@ -169,8 +168,6 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
         # PERFORMANCE FIX: Cache weight dtype at setup time (not every forward pass!)
         weight_dtype = module.weight.dtype
         is_fp8 = weight_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
-        
-        print(f"   • {layer_name}: weight_dtype={weight_dtype}, is_fp8={is_fp8}, scale_weight_device={scale_weight.device}")
         
         def enhanced_forward(input):
             # OPTIMIZED: Only check input shape - dtype and scale_weight checked at setup

@@ -197,6 +197,9 @@ def apply_fp8_optimization_to_model_simple(model, base_dtype, scale_weights):
                 if not hasattr(module, '_fp8_enhanced'):
                     module.forward = create_enhanced_forward(module, scale_weight, base_dtype, name)
                     module._fp8_enhanced = True
+                    # CRITICAL: Mark module with _lock_dtype so mmgp offload skips dtype assertions
+                    # (FP8 models have mixed dtypes: fp8 weights + fp32 scales)
+                    module._lock_dtype = True
                     optimized_count += 1
                 else:
                     skipped_count += 1

@@ -2905,12 +2905,12 @@ def load_models(model_type, override_profile = -1):
     if "transformer2" in pipe:
         loras_transformer += ["transformer2"]
     
-    # CRITICAL FIX: For FP8 models, pass ignore_dtype=True to skip dtype assertions
-    # FP8 models have mixed dtypes (fp8 weights + fp32 scales) which break uniform dtype checks
+    # CRITICAL FIX: For FP8 models, skip convertWeightsFloatTo (weights are already fp8, not float)
+    # FP8 layers are marked with _lock_dtype in fp8_scaled_loader.py to skip dtype assertions
     is_fp8_model = model_def.get("quantization", "").startswith("fp8") if model_def else False
     if is_fp8_model:
-        print(f"🔍 DEBUG: FP8 model detected, using ignore_dtype=True in offload.profile")
-        offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient, ignore_dtype=True, **kwargs)
+        print(f"🔍 DEBUG: FP8 model detected, FP8 layers marked with _lock_dtype to skip dtype checks")
+        offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient, **kwargs)
     else:
         offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
     if len(args.gpu) > 0:

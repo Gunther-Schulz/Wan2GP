@@ -2918,11 +2918,17 @@ def load_models(model_type, override_profile = -1):
         try:
             quantization = get_fp8_quantization_from_json(wan_model._model_quantization)
             if "fp8" in quantization:
-                model_file = model_filename[0] if isinstance(model_filename, list) else model_filename
+                # Use local_model_file_list which contains actual local file paths (not URLs)
+                # local_model_file_list was created by get_local_model_filename() above
+                model_file = local_model_file_list[0]
+                print(f"   Using local file for model1: {model_file}")
                 apply_fp8_optimization_to_model(wan_model.model, transformer_dtype, model_file, wan_model.device, quantization)
-                if wan_model.model2 is not None:
-                    model_file2 = model_filename[1] if isinstance(model_filename, list) and len(model_filename) > 1 else model_filename
+                
+                if wan_model.model2 is not None and len(local_model_file_list) > 1:
+                    model_file2 = local_model_file_list[1]
+                    print(f"   Using local file for model2: {model_file2}")
                     apply_fp8_optimization_to_model(wan_model.model2, transformer_dtype, model_file2, wan_model.device, quantization)
+                
                 print(f"✅ FP8 optimization re-applied after offload setup")
         except Exception as e:
             print(f"❌ Failed to re-apply FP8 optimization: {e}")

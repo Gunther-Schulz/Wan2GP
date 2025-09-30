@@ -2911,6 +2911,23 @@ def load_models(model_type, override_profile = -1):
     if is_fp8_model:
         print(f"🔍 DEBUG: FP8 model detected, FP8 layers marked with _lock_dtype to skip dtype checks")
         offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient, **kwargs)
+        
+        # CRITICAL: Apply FP8 optimization AFTER offload.profile() to prevent mmgp from overwriting our forward methods
+        print(f"\n🔍 DEBUG: Re-applying FP8 optimization AFTER offload setup...")
+        from shared.fp8_scaled_loader import get_fp8_quantization_from_json, apply_fp8_optimization_to_model
+        try:
+            quantization = get_fp8_quantization_from_json(wan_model._model_quantization)
+            if "fp8" in quantization:
+                model_file = model_filename[0] if isinstance(model_filename, list) else model_filename
+                apply_fp8_optimization_to_model(wan_model.model, dtype, model_file, wan_model.device, quantization)
+                if wan_model.model2 is not None:
+                    model_file2 = model_filename[1] if isinstance(model_filename, list) and len(model_filename) > 1 else model_filename
+                    apply_fp8_optimization_to_model(wan_model.model2, dtype, model_file2, wan_model.device, quantization)
+                print(f"✅ FP8 optimization re-applied after offload setup")
+        except Exception as e:
+            print(f"❌ Failed to re-apply FP8 optimization: {e}")
+            import traceback
+            traceback.print_exc()
     else:
         offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = False, loras = loras_transformer, coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
     if len(args.gpu) > 0:

@@ -2341,6 +2341,8 @@ reload_needed = False
 save_path = server_config.get("save_path", os.path.join(os.getcwd(), "outputs"))
 image_save_path = server_config.get("image_save_path", os.path.join(os.getcwd(), "outputs"))
 if not "video_output_codec" in server_config: server_config["video_output_codec"]= "libx264_8"
+if not "video_container" in server_config: server_config["video_container"]= "mp4"
+if not "embed_source_images" in server_config: server_config["embed_source_images"]= False
 if not "image_output_codec" in server_config: server_config["image_output_codec"]= "jpeg_95"
 
 preload_model_policy = server_config.get("preload_model_policy", []) 
@@ -2991,6 +2993,7 @@ def apply_changes(  state,
                     max_frames_multiplier_choice = 1,
                     display_stats_choice = 0,
                     video_output_codec_choice = None,
+                    embed_source_images_choice = None,
                     image_output_codec_choice = None,
                     audio_output_codec_choice = None,
                     last_resolution_choice = None,
@@ -3030,6 +3033,8 @@ def apply_changes(  state,
         "max_frames_multiplier" : max_frames_multiplier_choice,
         "display_stats" : display_stats_choice,
         "video_output_codec" : video_output_codec_choice,
+        "video_container" : "mp4",  # Fixed to MP4 format
+        "embed_source_images" : embed_source_images_choice,
         "image_output_codec" : image_output_codec_choice,
         "audio_output_codec" : audio_output_codec_choice,
         "sliding_window_keep_only_longest" : sliding_window_keep_only_longest_choice,
@@ -3078,7 +3083,7 @@ def apply_changes(  state,
         reset_prompt_enhancer()
     if all(change in ["attention_mode", "vae_config", "boost", "save_path", "metadata_type", "clear_file_list", "fit_canvas", "depth_anything_v2_variant", 
                       "notification_sound_enabled", "notification_sound_volume", "mmaudio_enabled", "max_frames_multiplier", "display_stats",
-                      "video_output_codec", "image_output_codec", "audio_output_codec"] for change in changes ):
+                      "video_output_codec", "video_container", "embed_source_images", "image_output_codec", "audio_output_codec"] for change in changes ):
         model_family = gr.Dropdown()
         model_choice = gr.Dropdown()
     else:
@@ -4263,7 +4268,7 @@ def edit_video(
     any_change = False
     if sample != None:
         video_path =get_available_filename(save_path, video_source, "_tmp") if any_mmaudio or has_already_audio else get_available_filename(save_path, video_source, "_post")  
-        save_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type= server_config.get("video_output_codec", None))
+        save_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type= server_config.get("video_output_codec", None), container=server_config.get("video_container", "mp4"))
 
         if any_mmaudio or has_already_audio: tmp_path = video_path
         any_change = True
@@ -4319,11 +4324,9 @@ def edit_video(
                 gen["file_list"].append(new_video_path)
                 gen["file_settings_list"].append(configs)
 
-            if configs != None:    
-                from mutagen.mp4 import MP4
-                file = MP4(new_video_path)
-                file.tags['©cmt'] = [json.dumps(configs)]
-                file.save()        
+            if configs != None:
+                from shared.utils.video_metadata import save_metadata_to_mp4
+                save_metadata_to_mp4(new_video_path, configs)        
 
             send_cmd("output")
             seed = set_seed(-1)
@@ -5446,7 +5449,11 @@ def generate_video(
                 save_prompt = original_prompts[0]
 
                 from shared.utils.utils import truncate_for_filesystem
-                extension = "jpg" if is_image else "mp4" 
+                if is_image:
+                    extension = "jpg"
+                else:
+                    container = server_config.get("video_container", "mp4")
+                    extension = container 
 
                 if os.name == 'nt':
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(truncate_for_filesystem(save_prompt,50)).strip()}.{extension}"
@@ -5471,8 +5478,9 @@ def generate_video(
                     cleanup_previous_video(previous_video_path, gen["file_list"], gen["file_settings_list"], lock, 
                                          sliding_window, sliding_window_keep_only_longest)
                     
-                    save_path_tmp = video_path[:-4] + "_tmp.mp4"
-                    save_video( tensor=sample[None], save_file=save_path_tmp, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type = server_config.get("video_output_codec", None))
+                    container = server_config.get("video_container", "mp4")
+                    save_path_tmp = video_path.rsplit('.', 1)[0] + f"_tmp.{container}"
+                    save_video( tensor=sample[None], save_file=save_path_tmp, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type = server_config.get("video_output_codec", None), container=server_config.get("video_container", "mp4"))
                     output_new_audio_temp_filepath = None
                     new_audio_from_start =  reset_control_aligment
                     source_audio_duration = source_video_frames_count / fps
@@ -5503,7 +5511,11 @@ def generate_video(
                     cleanup_previous_video(previous_video_path, gen["file_list"], gen["file_settings_list"], lock, 
                                          sliding_window, sliding_window_keep_only_longest)
                     
-                    save_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1),  codec_type= server_config.get("video_output_codec", None))
+                    # Prepare source images for embedding if enabled
+                    from shared.utils.source_image_embedding import prepare_source_images_dict
+                    source_images = prepare_source_images_dict(server_config, image_start, image_end, image_refs)
+                    
+                    save_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1),  codec_type= server_config.get("video_output_codec", None), container=server_config.get("video_container", "mp4"), source_images=source_images)
 
                 end_time = time.time()
 
@@ -5542,10 +5554,11 @@ def generate_video(
                         if is_image:
                             save_image_metadata(path, configs)
                         else:
-                            from mutagen.mp4 import MP4
-                            file = MP4(path)
-                            file.tags['©cmt'] = [json.dumps(configs)]
-                            file.save()
+                            from shared.utils.video_metadata import save_metadata_to_video
+                            try:
+                                save_metadata_to_video(path, configs)
+                            except Exception as e:
+                                print(f"Error adding metadata to MKV file {path}: {e}")
                     if is_image:
                         print(f"New image saved to Path: "+ path)
                     else:
@@ -6454,7 +6467,7 @@ def apply_post_processing(state, input_file_list, choice, PP_temporal_upsampling
     if len(file_list) == 0 or choice == None or choice < 0 or choice > len(file_list)  :
         return gr.update(), gr.update(), gr.update()
     
-    if not file_list[choice].endswith(".mp4"):
+    if not (file_list[choice].endswith(".mp4") or file_list[choice].endswith(".mkv")):
         gr.Info("Post processing is only available with Videos")
         return gr.update(), gr.update(), gr.update()
     overrides = {
@@ -6477,7 +6490,7 @@ def remux_audio(state, input_file_list, choice, PP_MMAudio_setting, PP_MMAudio_p
     if len(file_list) == 0 or choice == None or choice < 0 or choice > len(file_list)  :
         return gr.update(), gr.update(), gr.update()
     
-    if not file_list[choice].endswith(".mp4"):
+    if not (file_list[choice].endswith(".mp4") or file_list[choice].endswith(".mkv")):
         gr.Info("Post processing is only available with Videos")
         return gr.update(), gr.update(), gr.update()
     overrides = {
@@ -6597,6 +6610,16 @@ def export_settings(state):
     return text_base64, sanitize_file_name(model_type + "_" + datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d-%Hh%Mm%Ss") + ".json")
 
 
+def extract_and_apply_source_images(file_path, state):
+    """UI glue: get state, call module, set state. ALL logic is in source_image_embedding module."""
+    from shared.utils.source_image_embedding import extract_and_apply_to_settings
+    current_settings = get_model_settings(state, state["model_type"]) or {}
+    updated_settings, applied_count = extract_and_apply_to_settings(file_path, current_settings)
+    if applied_count > 0:
+        set_model_settings(state, state["model_type"], updated_settings)
+    return applied_count
+
+
 def use_video_settings(state, input_file_list, choice):
     gen = get_gen_info(state)
     file_list, file_settings_list = get_file_list(state, input_file_list)
@@ -6615,11 +6638,21 @@ def use_video_settings(state, input_file_list, choice):
             defaults = get_default_settings(model_type) if defaults == None else defaults
             defaults.update(configs)
             prompt = configs.get("prompt", "")
+            
+            # Extract and apply embedded source images from video files
+            extracted_images = extract_and_apply_source_images(file_name, state)
+            
             set_model_settings(state, model_type, defaults)
+            
+            # Update info message to include source image extraction
             if has_image_file_extension(file_name):
                 gr.Info(f"Settings Loaded from Image with prompt '{prompt[:100]}'")
             else:
-                gr.Info(f"Settings Loaded from Video with prompt '{prompt[:100]}'")
+                info_msg = f"Settings Loaded from Video with prompt '{prompt[:100]}'"
+                if extracted_images:
+                    info_msg += f" + {extracted_images} source image(s) extracted"
+                gr.Info(info_msg)
+            
             if models_compatible:
                 return gr.update(), gr.update(), str(time.time())
             else:
@@ -6638,13 +6671,12 @@ def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, sw
                 configs = json.load(f)
         except:
             pass
-    elif file_path.endswith(".mp4"):
-        from mutagen.mp4 import MP4
+    elif file_path.endswith(".mp4") or file_path.endswith(".mkv"):
+        from shared.utils.video_metadata import read_metadata_from_video
         try:
-            file = MP4(file_path)
-            tags = file.tags['©cmt'][0] 
-            configs = json.loads(tags)
-            any_image_or_video = True
+            configs = read_metadata_from_video(file_path)
+            if configs:
+                any_image_or_video = True
         except:
             pass
     elif has_image_file_extension(file_path):
@@ -6726,8 +6758,16 @@ def load_settings_from_file(state, file_path):
     prompt = configs.get("prompt", "")
     is_image = configs.get("is_image", False)
 
+    # Extract and apply embedded source images from video files
+    extracted_images = 0
+    if file_path.endswith('.mkv') or file_path.endswith('.mp4'):
+        extracted_images = extract_and_apply_source_images(file_path, state)
+
     if any_video_or_image_file:    
-        gr.Info(f"Settings Loaded from {'Image' if is_image else 'Video'} generated with prompt '{prompt[:100]}'")
+        info_msg = f"Settings Loaded from {'Image' if is_image else 'Video'} generated with prompt '{prompt[:100]}'"
+        if extracted_images > 0:
+            info_msg += f" + {extracted_images} source image(s) extracted and applied"
+        gr.Info(info_msg)
     else:
         gr.Info(f"Settings Loaded from Settings file with prompt '{prompt[:100]}'")
 
@@ -8520,7 +8560,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         progress(*progress_args)
                         gen["progress_args"] = None
                     status= gen.get("status","")
-                    if status == None or len(status) > 0:
+                    if status is not None and len(status) > 0:
                         yield status
                         gen["status"]= ""
                     if not gen.get("status_display", False):
@@ -9119,6 +9159,12 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                     label="Video Codec to use"
                 )
 
+                embed_source_images_choice = gr.Checkbox(
+                    value=server_config.get("embed_source_images", False),
+                    label="Embed Source Images",
+                    info="Saves i2v source images inside MP4 files"
+                )
+
                 image_output_codec_choice = gr.Dropdown(
                     choices=[
                         ("JPEG Quality 85", 'jpeg_85'),
@@ -9207,6 +9253,7 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                     max_frames_multiplier_choice,
                     display_stats_choice,
                     video_output_codec_choice,
+                    embed_source_images_choice,
                     image_output_codec_choice,
                     audio_output_codec_choice,
                     resolution,

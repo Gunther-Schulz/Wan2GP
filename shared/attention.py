@@ -68,7 +68,7 @@ def sageattn2_wrapper(
     return o
 
 try:
-    from sageattn import sageattn_blackwell as sageattn3
+    from sageattn3 import sageattn3_blackwell as sageattn3
 except ImportError:
     sageattn3 = None
 

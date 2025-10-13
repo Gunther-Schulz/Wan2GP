@@ -38,7 +38,7 @@ from shared.utils.utils import get_outpainting_frame_location, resize_lanczos, c
 from .multitalk.multitalk_utils import MomentumBuffer, adaptive_projected_guidance, match_and_blend_colors, match_and_blend_colors_with_mask
 from shared.utils.audio_video import save_video
 from mmgp import safetensors2
-from shared.utils.audio_video import save_video
+from shared.utils import files_locator as fl
 
 def optimized_scale(positive_flat, negative_flat):
 
@@ -60,7 +60,24 @@ def timestep_transform(t, shift=5.0, num_timesteps=1000 ):
     new_t = new_t * num_timesteps
     return new_t
     
-    
+def preprocess_sd_with_dtype(dtype, sd):
+    new_sd = {}
+    prefix_list = ["model.diffusion_model"]
+    end_list = [".norm3.bias", ".norm3.weight", ".norm_q.bias", ".norm_q.weight", ".norm_k.bias", ".norm_k.weight" ]
+    for k,v in sd.items():
+        for prefix in prefix_list:
+            if k.startswith(prefix): 
+                k = k[len(prefix)+1:]
+                break
+        if v.dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
+            for endfix in end_list:
+                if k.endswith(endfix):
+                    v = v.to(dtype)
+                    break
+        if not k.startswith("vae."):
+            new_sd[k] = v
+    return new_sd
+
 class WanAny2V:
 
     def __init__(
@@ -93,18 +110,17 @@ class WanAny2V:
             dtype=config.t5_dtype,
             device=torch.device('cpu'),
             checkpoint_path=text_encoder_filename,
-            tokenizer_path=os.path.join(checkpoint_dir, "umt5-xxl"),
+            tokenizer_path=fl.locate_folder("umt5-xxl"),
             shard_fn= None)
-
         # base_model_type = "i2v2_2"
         if hasattr(config, "clip_checkpoint") and not base_model_type in ["i2v_2_2", "i2v_2_2_multitalk"] or base_model_type in ["animate"]:
             self.clip = CLIPModel(
                 dtype=config.clip_dtype,
                 device=self.device,
-                checkpoint_path=os.path.join(checkpoint_dir , 
-                                            config.clip_checkpoint),
-                tokenizer_path=os.path.join(checkpoint_dir , "xlm-roberta-large"))
+                checkpoint_path=fl.locate_file(config.clip_checkpoint),
+                tokenizer_path=fl.locate_folder("xlm-roberta-large"))
 
+        ignore_unused_weights = model_def.get("ignore_unused_weights", False)
 
         if base_model_type in ["ti2v_2_2", "lucy_edit"]:
             self.vae_stride = (4, 16, 16)
@@ -116,9 +132,7 @@ class WanAny2V:
             vae = WanVAE
         self.patch_size = config.patch_size 
         
-        self.vae = vae(
-            vae_pth=os.path.join(checkpoint_dir, vae_checkpoint), dtype= VAE_dtype,
-            device="cpu")
+        self.vae = vae( vae_pth=fl.locate_file(vae_checkpoint), dtype= VAE_dtype, device="cpu")
         self.vae.device = self.device
         
         # config_filename= "configs/t2v_1.3B.json"
@@ -127,7 +141,7 @@ class WanAny2V:
         #     config = json.load(f)
         # sd = safetensors2.torch_load_file(xmodel_filename)
         # model_filename = "c:/temp/wan2.2i2v/low/diffusion_pytorch_model-00001-of-00006.safetensors"
-        base_config_file = f"configs/{base_model_type}.json"
+        base_config_file = f"models/wan/configs/{base_model_type}.json"
         forcedConfigPath = base_config_file if len(model_filename) > 1 else None
         # forcedConfigPath = base_config_file = f"configs/flf2v_720p.json"
         # model_filename[1] = xmodel_filename
@@ -136,14 +150,18 @@ class WanAny2V:
         source2 = model_def.get("source2", None)
         module_source =  model_def.get("module_source", None)
         module_source2 =  model_def.get("module_source2", None)
+        def preprocess_sd(sd):
+            return preprocess_sd_with_dtype(dtype, sd)
+        kwargs= { "modelClass": WanModel,"do_quantize": quantizeTransformer and not save_quantized, "defaultConfigPath": base_config_file , "ignore_unused_weights": ignore_unused_weights, "writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "forcedConfigPath": forcedConfigPath, }
+        kwargs_light= { "modelClass": WanModel,"writable_tensors": False, "preprocess_sd": preprocess_sd , "forcedConfigPath" : base_config_file}
         if module_source is not None:
-            self.model = offload.fast_load_transformers_model(model_filename[:1] + [module_source], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+            self.model = offload.fast_load_transformers_model(model_filename[:1] + [module_source], **kwargs)
         if module_source2 is not None:
-            self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [module_source2], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+            self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [module_source2], **kwargs)
         if source is not None:
-            self.model = offload.fast_load_transformers_model(source, modelClass=WanModel, writable_tensors= False, forcedConfigPath= base_config_file)
+            self.model = offload.fast_load_transformers_model(source,  **kwargs_light)
         if source2 is not None:
-            self.model2 = offload.fast_load_transformers_model(source2, modelClass=WanModel, writable_tensors= False, forcedConfigPath= base_config_file)
+            self.model2 = offload.fast_load_transformers_model(source2, **kwargs_light)
 
         if self.model is not None or self.model2 is not None:
             from wgp import save_model
@@ -155,17 +173,17 @@ class WanAny2V:
                 
                 if 0 in submodel_no_list[2:]:
                     shared_modules= {}
-                    self.model = offload.fast_load_transformers_model(model_filename[:1], modules = model_filename[2:], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath,  return_shared_modules= shared_modules)
-                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = shared_modules, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+                    self.model = offload.fast_load_transformers_model(model_filename[:1], modules = model_filename[2:], return_shared_modules= shared_modules, **kwargs)
+                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = shared_modules, **kwargs)
                     shared_modules = None
                 else:
                     modules_for_1 =[ file_name for file_name, submodel_no in zip(model_filename[2:],submodel_no_list[2:] ) if submodel_no ==1 ]
                     modules_for_2 =[ file_name for file_name, submodel_no in zip(model_filename[2:],submodel_no_list[2:] ) if submodel_no ==2 ]
-                    self.model = offload.fast_load_transformers_model(model_filename[:1], modules = modules_for_1, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
-                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = modules_for_2, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+                    self.model = offload.fast_load_transformers_model(model_filename[:1], modules = modules_for_1, **kwargs)
+                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = modules_for_2, **kwargs)
 
             else:
-                self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+                self.model = offload.fast_load_transformers_model(model_filename,  **kwargs)
         
 
         if self.model is not None:
@@ -467,7 +485,7 @@ class WanAny2V:
         # if NAG_scale > 1: context = torch.cat([context, context_NAG], dim=0)
         if self._interrupt: return None
 
-        vace = model_type in ["vace_1.3B","vace_14B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"]
+        vace = model_type in ["vace_1.3B","vace_14B", "vace_14B_2_2", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"]
         phantom = model_type in ["phantom_1.3B", "phantom_14B"]
         fantasy = model_type in ["fantasy"]
         multitalk = model_type in ["multitalk", "infinitetalk", "vace_multitalk_14B", "i2v_2_2_multitalk"]
@@ -706,15 +724,14 @@ class WanAny2V:
                 if True:
                     with init_empty_weights():
                         arc_resampler = Resampler( depth=4, dim=1280, dim_head=64, embedding_dim=512, ff_mult=4, heads=20, num_queries=16, output_dim=2048 if lynx_lite else 5120 )
-                    offload.load_model_data(arc_resampler, os.path.join("ckpts", "wan2.1_lynx_lite_arc_resampler.safetensors" if lynx_lite else "wan2.1_lynx_full_arc_resampler.safetensors"))
+                    offload.load_model_data(arc_resampler, fl.locate_file("wan2.1_lynx_lite_arc_resampler.safetensors" if lynx_lite else "wan2.1_lynx_full_arc_resampler.safetensors"))
                     arc_resampler.to(self.device)
                     arcface_embed = face_arc_embeds[None,None,:].to(device=self.device, dtype=torch.float) 
                     ip_hidden_states = arc_resampler(arcface_embed).to(self.dtype)
                     ip_hidden_states_uncond = arc_resampler(torch.zeros_like(arcface_embed)).to(self.dtype)
                 arc_resampler = None
                 if not lynx_lite:
-                    standin_ref_pos = -1
-                    image_ref = original_input_ref_images[standin_ref_pos]
+                    image_ref = original_input_ref_images[-1]
                     from preprocessing.face_preprocessor  import FaceProcessor 
                     face_processor = FaceProcessor()
                     lynx_ref = face_processor.process(image_ref, resize_to = 256 )
@@ -741,7 +758,7 @@ class WanAny2V:
                 face_processor = None
                 gc.collect()
                 torch.cuda.empty_cache()
-                standin_freqs = get_nd_rotary_pos_embed((-1, int(target_shape[-2]/2), int(target_shape[-1]/2) ), (-1, int(target_shape[-2]/2 + standin_ref.height/16), int(target_shape[-1]/2 + standin_ref.width/16) )) 
+                standin_freqs = get_nd_rotary_pos_embed((-1, int(height/16), int(width/16) ), (-1, int(height/16 + standin_ref.height/16), int(width/16 + standin_ref.width/16) )) 
                 standin_ref = self.vae.encode([ convert_image_to_tensor(standin_ref).unsqueeze(1) ], VAE_tile_size)[0].unsqueeze(0)
                 kwargs.update({ "standin_freqs": standin_freqs, "standin_ref": standin_ref, }) 
 
@@ -1132,6 +1149,6 @@ class WanAny2V:
             if "#" in video_prompt_type and "1" in video_prompt_type:
                 preloadURLs = get_model_recursive_prop(model_type,  "preload_URLs")
                 if len(preloadURLs) > 0: 
-                    return [os.path.join("ckpts", os.path.basename(preloadURLs[0]))] , [1]
+                    return [fl.locate_file(os.path.basename(preloadURLs[0]))] , [1]
         return [], []
 

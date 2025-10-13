@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import gradio as gr
+from shared.utils import files_locator as fl 
 
 def test_class_i2v(base_model_type):    
     return base_model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk", "infinitetalk", "i2v_2_2_multitalk", "animate" ]
@@ -22,7 +23,44 @@ def test_lynx(base_model_type):
 
 def test_wan_5B(base_model_type):
     return base_model_type in ["ti2v_2_2", "lucy_edit"]
+
 class family_handler():
+    @staticmethod
+    def query_supported_types():
+        return ["multitalk", "infinitetalk", "fantasy", "vace_14B", "vace_14B_2_2", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B",
+                    "t2v_1.3B", "standin", "lynx_lite", "lynx", "t2v", "t2v_2_2", "vace_1.3B", "phantom_1.3B", "phantom_14B", 
+                    "recam_1.3B", "animate",
+                    "i2v", "i2v_2_2", "i2v_2_2_multitalk", "ti2v_2_2", "lucy_edit", "flf2v_720p", "fun_inp_1.3B", "fun_inp"]
+
+
+    @staticmethod
+    def query_family_maps():
+
+        models_eqv_map = {
+            "flf2v_720p" : "i2v",
+            "t2v_1.3B" : "t2v",
+            "t2v_2_2" : "t2v",
+            "vace_standin_14B" : "vace_14B",
+            "vace_lynx_14B" : "vace_14B",
+            "vace_14B_2_2": "vace_14B",
+        }
+
+        models_comp_map = { 
+                    "vace_14B" : [ "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_lite_14B", "vace_lynx_14B", "vace_14B_2_2"],
+                    "t2v" : [ "vace_14B", "vace_1.3B" "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_lite_14B", "vace_lynx_14B", "vace_14B_2_2", "t2v_1.3B", "phantom_1.3B","phantom_14B", "standin", "lynx_lite", "lynx"],
+                    "i2v" : [ "fantasy", "multitalk", "flf2v_720p" ],
+                    "i2v_2_2" : ["i2v_2_2_multitalk"],
+                    "fantasy": ["multitalk"],
+                    }
+        return models_eqv_map, models_comp_map
+
+    @staticmethod
+    def query_model_family():
+        return "wan"
+    
+    @staticmethod
+    def query_family_infos():
+        return {"wan":(0, "Wan2.1"), "wan2_2":(1, "Wan2.2") }
 
     @staticmethod
     def set_cache_parameters(cache_type, base_model_type, model_def, inputs, skip_steps_cache):
@@ -71,10 +109,10 @@ class family_handler():
 
     @staticmethod
     def get_wan_text_encoder_filename(text_encoder_quantization):
-        text_encoder_filename = "ckpts/umt5-xxl/models_t5_umt5-xxl-enc-bf16.safetensors"
+        text_encoder_filename =  "umt5-xxl/models_t5_umt5-xxl-enc-bf16.safetensors"
         if text_encoder_quantization =="int8":
             text_encoder_filename = text_encoder_filename.replace("bf16", "quanto_int8") 
-        return text_encoder_filename
+        return  fl.locate_file(text_encoder_filename, True)
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
@@ -86,8 +124,27 @@ class family_handler():
         extra_model_def["multitalk_class"] = test_multitalk(base_model_type)
         extra_model_def["standin_class"] = test_standin(base_model_type)
         extra_model_def["lynx_class"] = test_lynx(base_model_type)
-        vace_class = base_model_type in ["vace_14B", "vace_1.3B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"] 
+        vace_class = base_model_type in ["vace_14B", "vace_14B_2_2", "vace_1.3B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"] 
         extra_model_def["vace_class"] = vace_class
+        if base_model_type in ["vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"]:
+            extra_model_def["parent_model_type"] = "vace_14B"
+
+        group = "wan"
+        if base_model_type in ["t2v_2_2", "i2v_2_2", "vace_14B_2_2"]:
+            profiles_dir = "wan_2_2"
+            group = "wan2_2"
+        elif i2v:
+            profiles_dir = "wan_i2v"
+        elif test_wan_5B(base_model_type):
+            profiles_dir = "wan_2_2_5B"
+            group = "wan2_2"
+        elif test_class_1_3B(base_model_type):
+            profiles_dir = "wan_1.3B"
+        else:
+            profiles_dir = "wan"
+
+        extra_model_def["profiles_dir"] = [profiles_dir]
+        extra_model_def["group"] = group
 
         if base_model_type in ["animate"]:
             fps = 30
@@ -108,7 +165,7 @@ class family_handler():
         extra_model_def.update({
         "frames_minimum" : frames_minimum,
         "frames_steps" : frames_steps, 
-        "sliding_window" : base_model_type in ["multitalk", "infinitetalk", "t2v", "fantasy", "animate"] or test_class_i2v(base_model_type) or test_wan_5B(base_model_type) or vace_class,  #"ti2v_2_2",
+        "sliding_window" : base_model_type in ["multitalk", "infinitetalk", "t2v", "t2v_2_2", "fantasy", "animate"] or test_class_i2v(base_model_type) or test_wan_5B(base_model_type) or vace_class,  #"ti2v_2_2",
         "multiple_submodels" : multiple_submodels,
         "guidance_max_phases" : 3,
         "skip_layer_guidance" : True,        
@@ -127,12 +184,13 @@ class family_handler():
         })
 
 
-        if base_model_type in ["t2v"]: 
+        if base_model_type in ["t2v", "t2v_2_2"]: 
             extra_model_def["guide_custom_choices"] = {
                 "choices":[("Use Text Prompt Only", ""),
                            ("Video to Video guided by Text Prompt", "GUV"),
                            ("Video to Video guided by Text Prompt and Restricted to the Area of the Video Mask", "GVA")],
                 "default": "",
+                "show_label" : False,
                 "letters_filter": "GUVA",
                 "label": "Video to Video"
             }
@@ -255,10 +313,9 @@ class family_handler():
                 extra_model_def["set_video_prompt_type"]="Q"
                 extra_model_def["control_net_weight_alt_name"] = "Lynx"
                 extra_model_def["image_ref_choices"]["choices"] = [("None", ""),
-                    ("People / Objects", "I"),
-                    ("Landscape followed by People / Objects (if any)", "KI"),
-                    ("Positioned Frames followed by People / Objects (if any)", "FI"),
-                    ]
+                    ("People / Objects (if any) then a Face", "I"),
+                    ("Landscape followed by People / Objects (if any) then a Face", "KI"),
+                    ("Positioned Frames followed by People / Objects (if any) then a Face", "FI")]
                 extra_model_def["background_removal_label"]= "Remove Backgrounds behind People / Objects, keep it for Landscape, Lynx Face or Positioned Frames"
                 extra_model_def["no_processing_on_last_images_refs"] = 1
 
@@ -266,6 +323,15 @@ class family_handler():
 
         if base_model_type in ["standin"]: 
             extra_model_def["v2i_switch_supported"] = True
+            extra_model_def["image_ref_choices"] = {
+                "choices": [
+                    ("No Reference Image", ""),
+                    ("Reference Image is a Person Face", "I"),
+                    ],
+                "visible": False,
+                "letters_filter":"I",
+            }
+            extra_model_def["one_image_ref_needed"] = True
 
         if base_model_type in ["lynx_lite", "lynx"]: 
             extra_model_def["fit_into_canvas_image_refs"] = 0
@@ -292,7 +358,7 @@ class family_handler():
                 "visible": False,
                 "letters_filter":"I",
             }
-
+            extra_model_def["one_image_ref_needed"] = True
             extra_model_def["set_video_prompt_type"]= "Q"
             extra_model_def["no_background_removal"] = True
             extra_model_def["v2i_switch_supported"] = True
@@ -330,7 +396,7 @@ class family_handler():
                     "visible" : False,
                 }
 
-        if vace_class or base_model_type in ["animate"]:
+        if vace_class or base_model_type in ["animate", "t2v", "t2v_2_2"] :
             image_prompt_types_allowed = "TVL"
         elif base_model_type in ["infinitetalk"]:
             image_prompt_types_allowed = "TSVL"
@@ -355,40 +421,6 @@ class family_handler():
 
         return extra_model_def
         
-    @staticmethod
-    def query_supported_types():
-        return ["multitalk", "infinitetalk", "fantasy", "vace_14B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B",
-                    "t2v_1.3B", "standin", "lynx_lite", "lynx", "t2v", "vace_1.3B", "phantom_1.3B", "phantom_14B", 
-                    "recam_1.3B", "animate",
-                    "i2v", "i2v_2_2", "i2v_2_2_multitalk", "ti2v_2_2", "lucy_edit", "flf2v_720p", "fun_inp_1.3B", "fun_inp"]
-
-
-    @staticmethod
-    def query_family_maps():
-
-        models_eqv_map = {
-            "flf2v_720p" : "i2v",
-            "t2v_1.3B" : "t2v",
-            "vace_standin_14B" : "vace_14B",
-            "vace_lynx_14B" : "vace_14B",
-        }
-
-        models_comp_map = { 
-                    "vace_14B" : [ "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_lite_14B", "vace_lynx_14B"],
-                    "t2v" : [ "vace_14B", "vace_1.3B" "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_lite_14B", "vace_lynx_14B", "t2v_1.3B", "phantom_1.3B","phantom_14B", "standin", "lynx_lite", "lynx"],
-                    "i2v" : [ "fantasy", "multitalk", "flf2v_720p" ],
-                    "i2v_2_2" : ["i2v_2_2_multitalk"],
-                    "fantasy": ["multitalk"],
-                    }
-        return models_eqv_map, models_comp_map
-
-    @staticmethod
-    def query_model_family():
-        return "wan"
-    
-    @staticmethod
-    def query_family_infos():
-        return {"wan":(0, "Wan2.1"), "wan2_2":(1, "Wan2.2") }
 
     @staticmethod
     def get_vae_block_size(base_model_type):
@@ -515,6 +547,13 @@ class family_handler():
                     video_prompt_type = video_prompt_type.replace("Q", "0")
                     ui_defaults["video_prompt_type"] = video_prompt_type 
 
+        if settings_version < 2.39:
+            if base_model_type in ["fantasy"]:
+                audio_prompt_type = ui_defaults.get("audio_prompt_type", "")
+                if not "A" in audio_prompt_type:
+                    audio_prompt_type +=  "A"
+                    ui_defaults["audio_prompt_type"] = audio_prompt_type 
+
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
         ui_defaults.update({
@@ -527,6 +566,7 @@ class family_handler():
             ui_defaults.update({
                 "audio_guidance_scale": 5.0,
                 "sliding_window_overlap" : 1,
+                "audio_prompt_type": "A",
             })
 
         elif base_model_type in ["multitalk"]:
@@ -535,6 +575,7 @@ class family_handler():
                 "flow_shift": 7, # 11 for 720p
                 "sliding_window_discard_last_frames" : 4,
                 "sample_solver" : "euler",
+                "audio_prompt_type": "A",
                 "adaptive_switch" : 1,
             })
 

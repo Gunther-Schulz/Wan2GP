@@ -27,16 +27,17 @@ from .modules.vae2_2 import Wan2_2_VAE
 
 from .modules.clip import CLIPModel
 from shared.utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
-                               get_sampling_sigmas, retrieve_timesteps)
+                              get_sampling_sigmas, retrieve_timesteps)
+from shared.utils.seed_management import create_generator, create_subseed_generator, apply_subseed_variation
 from shared.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .modules.posemb_layers import get_rotary_pos_embed, get_nd_rotary_pos_embed
 from shared.utils.vace_preprocessor import VaceVideoProcessor
 from shared.utils.basic_flowmatch import FlowMatchScheduler
-from shared.utils.lcm_scheduler import LCMScheduler
 from shared.utils.utils import get_outpainting_frame_location, resize_lanczos, calculate_new_dimensions, convert_image_to_tensor, fit_image_into_canvas
 from .multitalk.multitalk_utils import MomentumBuffer, adaptive_projected_guidance, match_and_blend_colors, match_and_blend_colors_with_mask
 from shared.utils.audio_video import save_video
 from mmgp import safetensors2
+from shared.utils.audio_video import save_video
 
 def optimized_scale(positive_flat, negative_flat):
 
@@ -344,6 +345,8 @@ class WanAny2V:
         model_switch_phase = 1,
         n_prompt="",
         seed=-1,
+        subseed=-1,
+        subseed_strength=0.0,
         callback = None,
         enable_RIFLEx = None,
         VAE_tile_size = 0,
@@ -413,23 +416,13 @@ class WanAny2V:
                 sample_scheduler,
                 device=self.device,
                 sigmas=sampling_sigmas)
-        elif sample_solver == 'lcm':
-            # LCM + LTX scheduler: Latent Consistency Model with RectifiedFlow
-            # Optimized for Lightning LoRAs with ultra-fast 2-8 step inference
-            effective_steps = min(sampling_steps, 8)  # LCM works best with few steps
-            sample_scheduler = LCMScheduler(
-                num_train_timesteps=self.num_train_timesteps,
-                num_inference_steps=effective_steps,
-                shift=shift
-            )
-            sample_scheduler.set_timesteps(effective_steps, device=self.device, shift=shift)
-            timesteps = sample_scheduler.timesteps
         else:
             raise NotImplementedError(f"Unsupported Scheduler {sample_solver}")
         original_timesteps = timesteps
 
-        seed_g = torch.Generator(device=self.device)
-        seed_g.manual_seed(seed)
+        seed_g = create_generator(seed, self.device)
+        subseed_g = create_subseed_generator(subseed, subseed_strength, self.device)
+        
         image_outputs = image_mode == 1
         kwargs = {'pipeline': self, 'callback': callback}
         color_reference_frame = None
@@ -686,13 +679,68 @@ class WanAny2V:
                 if extended_input_dim > 0:
                     extended_latents[:, :, :source_latents.shape[2]] = source_latents
 
+        # Lynx
+        if lynx :
+            if original_input_ref_images is None or len(original_input_ref_images) == 0:
+                lynx = False
+            elif "K" in video_prompt_type and len(input_ref_images) <= 1:
+                print("Warning: Missing Lynx Ref Image, make sure 'Inject only People / Objets' is selected or if there is 'Landscape and then People or Objects' there are at least two ref images (one Landscape image followed by face).")
+                lynx = False
+            else:
+                from  .lynx.resampler import Resampler
+                from accelerate import init_empty_weights
+                lynx_lite = model_type in ["lynx_lite", "vace_lynx_lite_14B"]
+                ip_hidden_states = ip_hidden_states_uncond = None
+                if True:
+                    with init_empty_weights():
+                        arc_resampler = Resampler( depth=4, dim=1280, dim_head=64, embedding_dim=512, ff_mult=4, heads=20, num_queries=16, output_dim=2048 if lynx_lite else 5120 )
+                    offload.load_model_data(arc_resampler, os.path.join("ckpts", "wan2.1_lynx_lite_arc_resampler.safetensors" if lynx_lite else "wan2.1_lynx_full_arc_resampler.safetensors"))
+                    arc_resampler.to(self.device)
+                    arcface_embed = face_arc_embeds[None,None,:].to(device=self.device, dtype=torch.float) 
+                    ip_hidden_states = arc_resampler(arcface_embed).to(self.dtype)
+                    ip_hidden_states_uncond = arc_resampler(torch.zeros_like(arcface_embed)).to(self.dtype)
+                arc_resampler = None
+                if not lynx_lite:
+                    standin_ref_pos = -1
+                    image_ref = original_input_ref_images[standin_ref_pos]
+                    from preprocessing.face_preprocessor  import FaceProcessor 
+                    face_processor = FaceProcessor()
+                    lynx_ref = face_processor.process(image_ref, resize_to = 256 )
+                    lynx_ref_buffer, lynx_ref_buffer_uncond = self.encode_reference_images([lynx_ref], tile_size=VAE_tile_size, any_guidance= any_guidance_at_all)
+                    lynx_ref = None
+                gc.collect()
+                torch.cuda.empty_cache()
+                vace_lynx = model_type in ["vace_lynx_14B"]
+                kwargs["lynx_ip_scale"] = control_scale_alt
+                kwargs["lynx_ref_scale"] = control_scale_alt
+
+        #Standin
+        if standin:
+            from preprocessing.face_preprocessor  import FaceProcessor 
+            standin_ref_pos = 1 if "K" in video_prompt_type else 0
+            if len(original_input_ref_images) < standin_ref_pos + 1: 
+                if "I" in video_prompt_type and model_type in ["vace_standin_14B"]:
+                    print("Warning: Missing Standin ref image, make sure 'Inject only People / Objets' is selected or if there is 'Landscape and then People or Objects' there are at least two ref images.")
+            else: 
+                standin_ref_pos = -1
+                image_ref = original_input_ref_images[standin_ref_pos]
+                face_processor = FaceProcessor()
+                standin_ref = face_processor.process(image_ref, remove_bg = model_type in ["vace_standin_14B"])
+                face_processor = None
+                gc.collect()
+                torch.cuda.empty_cache()
+                standin_freqs = get_nd_rotary_pos_embed((-1, int(target_shape[-2]/2), int(target_shape[-1]/2) ), (-1, int(target_shape[-2]/2 + standin_ref.height/16), int(target_shape[-1]/2 + standin_ref.width/16) )) 
+                standin_ref = self.vae.encode([ convert_image_to_tensor(standin_ref).unsqueeze(1) ], VAE_tile_size)[0].unsqueeze(0)
+                kwargs.update({ "standin_freqs": standin_freqs, "standin_ref": standin_ref, }) 
+
+
         # Vace
         if vace :
             # vace context encode
             input_frames = [input_frames.to(self.device)] +([] if input_frames2 is None else [input_frames2.to(self.device)])            
             input_masks = [input_masks.to(self.device)] + ([] if input_masks2 is None else [input_masks2.to(self.device)])
-            if model_type in ["vace_lynx_14B"]:
-                input_ref_images = input_ref_masks = None          
+            if model_type in ["vace_lynx_14B"] and input_ref_images is not None:
+                input_ref_images,input_ref_masks = input_ref_images[:-1], input_ref_masks[:-1]
             input_ref_images = None if input_ref_images is None else [ u.to(self.device) for u in input_ref_images]
             input_ref_masks = None if input_ref_masks is None else [ None if u is None else u.to(self.device) for u in input_ref_masks]
             ref_images_before = True
@@ -743,57 +791,6 @@ class WanAny2V:
             freqs = get_rotary_pos_embed(target_shape[1:], enable_RIFLEx= enable_RIFLEx) 
 
         kwargs["freqs"] = freqs
-
-        # Lynx
-        if lynx :
-            if original_input_ref_images is None or len(original_input_ref_images) == 0:
-                lynx = False
-            else:
-                from  .lynx.resampler import Resampler
-                from accelerate import init_empty_weights
-                lynx_lite = model_type in ["lynx_lite", "vace_lynx_lite_14B"]
-                ip_hidden_states = ip_hidden_states_uncond = None
-                if True:
-                    with init_empty_weights():
-                        arc_resampler = Resampler( depth=4, dim=1280, dim_head=64, embedding_dim=512, ff_mult=4, heads=20, num_queries=16, output_dim=2048 if lynx_lite else 5120 )
-                    offload.load_model_data(arc_resampler, os.path.join("ckpts", "wan2.1_lynx_lite_arc_resampler.safetensors" if lynx_lite else "wan2.1_lynx_full_arc_resampler.safetensors"))
-                    arc_resampler.to(self.device)
-                    arcface_embed = face_arc_embeds[None,None,:].to(device=self.device, dtype=torch.float) 
-                    ip_hidden_states = arc_resampler(arcface_embed).to(self.dtype)
-                    ip_hidden_states_uncond = arc_resampler(torch.zeros_like(arcface_embed)).to(self.dtype)
-                arc_resampler = None
-                if not lynx_lite:
-                    standin_ref_pos = -1
-                    image_ref = original_input_ref_images[standin_ref_pos]
-                    from preprocessing.face_preprocessor  import FaceProcessor 
-                    face_processor = FaceProcessor()
-                    lynx_ref = face_processor.process(image_ref, resize_to = 256 )
-                    lynx_ref_buffer, lynx_ref_buffer_uncond = self.encode_reference_images([lynx_ref], tile_size=VAE_tile_size, any_guidance= any_guidance_at_all)
-                    lynx_ref = None
-                gc.collect()
-                torch.cuda.empty_cache()
-                vace_lynx = model_type in ["vace_lynx_14B"]
-                kwargs["lynx_ip_scale"] = control_scale_alt
-                kwargs["lynx_ref_scale"] = control_scale_alt
-
-        #Standin
-        if standin:
-            from preprocessing.face_preprocessor  import FaceProcessor 
-            standin_ref_pos = 1 if "K" in video_prompt_type else 0
-            if len(original_input_ref_images) < standin_ref_pos + 1: 
-                if "I" in video_prompt_type and model_type in ["vace_standin_14B"]:
-                    print("Warning: Missing Standin ref image, make sure 'Inject only People / Objets' is selected or if there is 'Landscape and then People or Objects' there are at least two ref images.")
-            else: 
-                standin_ref_pos = -1
-                image_ref = original_input_ref_images[standin_ref_pos]
-                face_processor = FaceProcessor()
-                standin_ref = face_processor.process(image_ref, remove_bg = model_type in ["vace_standin_14B"])
-                face_processor = None
-                gc.collect()
-                torch.cuda.empty_cache()
-                standin_freqs = get_nd_rotary_pos_embed((-1, int(target_shape[-2]/2), int(target_shape[-1]/2) ), (-1, int(target_shape[-2]/2 + standin_ref.height/16), int(target_shape[-1]/2 + standin_ref.width/16) )) 
-                standin_ref = self.vae.encode([ convert_image_to_tensor(standin_ref).unsqueeze(1) ], VAE_tile_size)[0].unsqueeze(0)
-                kwargs.update({ "standin_freqs": standin_freqs, "standin_ref": standin_ref, }) 
 
 
         # Steps Skipping
@@ -857,6 +854,8 @@ class WanAny2V:
             scheduler_kwargs = {} if isinstance(sample_scheduler, FlowMatchScheduler) else {"generator": seed_g}
         # b, c, lat_f, lat_h, lat_w
         latents = torch.randn(batch_size, *target_shape, dtype=torch.float32, device=self.device, generator=seed_g)
+        latents = apply_subseed_variation(latents, subseed_g, subseed_strength)
+        
         if "G" in video_prompt_type: randn = latents
         if apg_switch != 0:  
             apg_momentum = -0.75
@@ -929,7 +928,8 @@ class WanAny2V:
                 gen_args = {
                     "x" : [latent_model_input, latent_model_input],
                     "context" : [context, context_null],
-                    "face_pixel_values": [face_pixel_values, None]
+                    # "face_pixel_values": [face_pixel_values, None]
+                    "face_pixel_values": [face_pixel_values, face_pixel_values] # seems to look better this way
                 }
             elif lynx:
                 gen_args = {

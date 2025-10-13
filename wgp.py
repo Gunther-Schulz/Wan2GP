@@ -38,6 +38,7 @@ import typing
 import asyncio
 import inspect
 from shared.utils import prompt_parser
+from shared.utils.sliding_window_cleanup import cleanup_previous_video, should_cleanup_video, get_cleanup_status_text
 import base64
 import io
 from PIL import Image
@@ -63,7 +64,7 @@ AUTOSAVE_FILENAME = "queue.zip"
 PROMPT_VARS_MAX = 10
 
 target_mmgp_version = "3.6.0"
-WanGP_version = "8.9"
+WanGP_version = "8.99"
 settings_version = 2.38
 max_source_video_frames = 3000
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
@@ -147,6 +148,24 @@ def format_time(seconds):
         return f"{minutes}m {secs:02d}s"
     else:
         return f"{seconds:.1f}s"
+
+def format_generation_time(seconds):
+    """Format generation time showing raw seconds with human-readable time in parentheses when over 60s"""
+    raw_seconds = f"{int(seconds)}s"
+    
+    if seconds < 60:
+        return raw_seconds
+    
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    
+    if hours > 0:
+        human_readable = f"{hours}h {minutes}m {secs}s"
+    else:
+        human_readable = f"{minutes}m {secs}s"
+    
+    return f"{raw_seconds} ({human_readable})"
 
 def pil_to_base64_uri(pil_image, format="png", quality=75):
     if pil_image is None:
@@ -360,6 +379,12 @@ def process_prompt_and_add_tasks(state, model_choice):
     if server_config.get("fit_canvas", 0) == 2 and outpainting_dims is not None and any_letters(video_prompt_type, "VKF"):
         gr.Info("Output Resolution Cropping will be not used for this Generation as it is not compatible with Video Outpainting")
 
+    if len(activated_loras) > 0:
+        error = check_loras_exist(model_type, activated_loras)
+        if len(error) > 0:
+            gr.Info(error)
+            return ret()
+        
     if len(loras_multipliers) > 0:
         _, _, errors =  parse_loras_multipliers(loras_multipliers, len(activated_loras), num_inference_steps, nb_phases= guidance_phases)
         if len(errors) > 0: 
@@ -563,7 +588,8 @@ def process_prompt_and_add_tasks(state, model_choice):
             full_video_length = video_length if video_source is None else video_length +  sliding_window_overlap -1
             extra = "" if full_video_length == video_length else f" including {sliding_window_overlap} added for Video Continuation"
             no_windows = compute_sliding_window_no(full_video_length, sliding_window_size, sliding_window_discard_last_frames, sliding_window_overlap)
-            gr.Info(f"The Number of Frames to generate ({video_length}{extra}) is greater than the Sliding Window Size ({sliding_window_size}), {no_windows} Windows will be generated")
+            cleanup_status = get_cleanup_status_text(server_config)
+            gr.Info(f"The Number of Frames to generate ({video_length}{extra}) is greater than the Sliding Window Size ({sliding_window_size}), {no_windows} Windows will be generated. Video Cleanup: {cleanup_status}")
     if "recam" in model_filename:
         if video_guide == None:
             gr.Info("You must provide a Control Video")
@@ -773,6 +799,36 @@ def move_down(queue, selected_indices):
         elif idx == len(queue)-1:
             queue[:] = queue[0:1] + queue[-1:] + queue[1:-1]
 
+    return update_queue_data(queue)
+
+def move_to_top(queue, selected_indices):
+    if not selected_indices or len(selected_indices) == 0:
+        return update_queue_data(queue)
+    idx = selected_indices[0]
+    if isinstance(idx, list):
+        idx = idx[0]
+    idx = int(idx)
+    with lock:
+        idx += 1  # Account for current generation at index 0
+        if idx > 1:  # Only move if not already at top (position 1)
+            item = queue.pop(idx)
+            queue.insert(1, item)
+    
+    return update_queue_data(queue)
+
+def move_to_bottom(queue, selected_indices):
+    if not selected_indices or len(selected_indices) == 0:
+        return update_queue_data(queue)
+    idx = selected_indices[0]
+    if isinstance(idx, list):
+        idx = idx[0]
+    idx = int(idx)
+    with lock:
+        idx += 1  # Account for current generation at index 0
+        if idx < len(queue) - 1:  # Only move if not already at bottom
+            item = queue.pop(idx)
+            queue.append(item)
+    
     return update_queue_data(queue)
 
 def remove_task(queue, selected_indices):
@@ -1345,6 +1401,8 @@ def get_queue_table(queue):
                     end_img_md,
                     "↑",
                     "↓",
+                    "⭱",
+                    "⭳",
                     "✖"
                     ])    
     return data
@@ -1817,7 +1875,8 @@ if not Path(server_config_filename).is_file():
         "vae_config": 0,
         "profile" : profile_type.LowRAM_LowVRAM,
         "preload_model_policy": [],
-        "UI_theme": "default"
+        "UI_theme": "default",
+        "sliding_window_keep_only_longest": False
     }
 
     with open(server_config_filename, "w", encoding="utf-8") as writer:
@@ -2089,10 +2148,10 @@ def get_transformer_dtype(model_family, transformer_dtype_policy):
 def get_settings_file_name(model_type):
     return  os.path.join(args.settings, model_type + "_settings.json")
 
-def fix_settings(model_type, ui_defaults):
+def fix_settings(model_type, ui_defaults, min_settings_version = 0):
     if model_type is None: return
 
-    settings_version =  ui_defaults.get("settings_version", 0)
+    settings_version =  max(min_settings_version, ui_defaults.get("settings_version", 0))
     model_def = get_model_def(model_type)
     base_model_type = get_base_model_type(model_type)
 
@@ -2184,7 +2243,7 @@ def fix_settings(model_type, ui_defaults):
 
     model_handler = get_model_handler(base_model_type)
     if hasattr(model_handler, "fix_settings"):
-        model_handler.fix_settings(base_model_type, settings_version, model_def, ui_defaults)
+            model_handler.fix_settings(base_model_type, settings_version, model_def, ui_defaults)
 
 
 def get_default_settings(model_type):
@@ -2205,6 +2264,8 @@ def get_default_settings(model_type):
             "video_length": 81,
             "num_inference_steps": 30,
             "seed": -1,
+            "subseed": -1,
+            "subseed_strength": 0.0,
             "repeat_generation": 1,
             "multi_images_gen_type": 0,        
             "guidance_scale": 5.0,
@@ -2338,6 +2399,8 @@ reload_needed = False
 save_path = server_config.get("save_path", os.path.join(os.getcwd(), "outputs"))
 image_save_path = server_config.get("image_save_path", os.path.join(os.getcwd(), "outputs"))
 if not "video_output_codec" in server_config: server_config["video_output_codec"]= "libx264_8"
+if not "video_container" in server_config: server_config["video_container"]= "mp4"
+if not "embed_source_images" in server_config: server_config["embed_source_images"]= False
 if not "image_output_codec" in server_config: server_config["image_output_codec"]= "jpeg_95"
 
 preload_model_policy = server_config.get("preload_model_policy", []) 
@@ -2525,6 +2588,27 @@ def download_mmaudio():
         }
         process_files_def(**enhancer_def)
 
+
+def download_file(url,filename):
+    if url.startswith("https://huggingface.co/") and "/resolve/main/" in url:
+        base_dir = os.path.dirname(filename)
+        url = url[len("https://huggingface.co/"):]
+        url_parts = url.split("/resolve/main/")
+        repoId = url_parts[0]
+        onefile = os.path.basename(url_parts[-1])
+        sourceFolder = os.path.dirname(url_parts[-1])
+        if len(sourceFolder) == 0:
+            hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = "ckpts/" if len(base_dir)==0 else base_dir)
+        else:
+            target_path = "ckpts/temp/" + sourceFolder
+            if not os.path.exists(target_path):
+                os.makedirs(target_path)
+            hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = "ckpts/temp/", subfolder=sourceFolder)
+            shutil.move(os.path.join( "ckpts", "temp" , sourceFolder , onefile), "ckpts/" if len(base_dir)==0 else base_dir)
+            shutil.rmtree("ckpts/temp")
+    else:
+        urlretrieve(url,filename, create_progress_hook(filename))
+
 download_shared_done = False
 def download_models(model_filename = None, model_type= None, module_type = False, submodel_no = 1):
     def computeList(filename):
@@ -2573,26 +2657,6 @@ def download_models(model_filename = None, model_type= None, module_type = False
     download_shared_done = True
 
     if model_filename is None: return
-
-    def download_file(url,filename):
-        if url.startswith("https://huggingface.co/") and "/resolve/main/" in url:
-            base_dir = os.path.dirname(filename)
-            url = url[len("https://huggingface.co/"):]
-            url_parts = url.split("/resolve/main/")
-            repoId = url_parts[0]
-            onefile = os.path.basename(url_parts[-1])
-            sourceFolder = os.path.dirname(url_parts[-1])
-            if len(sourceFolder) == 0:
-                hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = "ckpts/" if len(base_dir)==0 else base_dir)
-            else:
-                target_path = "ckpts/temp/" + sourceFolder
-                if not os.path.exists(target_path):
-                    os.makedirs(target_path)
-                hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = "ckpts/temp/", subfolder=sourceFolder)
-                shutil.move(os.path.join( "ckpts", "temp" , sourceFolder , onefile), "ckpts/" if len(base_dir)==0 else base_dir)
-                shutil.rmtree("ckpts/temp")
-        else:
-            urlretrieve(url,filename, create_progress_hook(filename))
 
     base_model_type = get_base_model_type(model_type)
     model_def = get_model_def(model_type)
@@ -2653,6 +2717,33 @@ offload.default_verboseLevel = verbose_level
 def sanitize_file_name(file_name, rep =""):
     return file_name.replace("/",rep).replace("\\",rep).replace(":",rep).replace("|",rep).replace("?",rep).replace("<",rep).replace(">",rep).replace("\"",rep).replace("\n",rep).replace("\r",rep) 
 
+def check_loras_exist(model_type, loras_choices_files, download = False, send_cmd = None):
+    lora_dir = get_lora_dir(model_type)
+    missing_local_loras = []
+    missing_remote_loras = []
+    for lora_file in loras_choices_files:
+        local_path = os.path.join(lora_dir, os.path.basename(lora_file))
+        if not os.path.isfile(local_path):
+            url = loras_url_cache.get(local_path, None)         
+            if url is not None:
+                if download:
+                    if send_cmd is not None:
+                        send_cmd("status", f'Downloading Lora {os.path.basename(lora_file)}...')
+                    try:
+                        download_file(url, local_path)
+                    except:
+                        missing_remote_loras.append(lora_file)
+            else:
+                missing_local_loras.append(lora_file)
+
+    error = ""
+    if len(missing_local_loras) > 0:
+        error += f"The following Loras files are missing or invalid: {missing_local_loras}."
+    if len(missing_remote_loras) > 0:
+        error += f"The following Loras files could not be downloaded: {missing_remote_loras}."
+    
+    return error
+
 def extract_preset(model_type, lset_name, loras):
     loras_choices = []
     loras_choices_files = []
@@ -2669,24 +2760,12 @@ def extract_preset(model_type, lset_name, loras):
     if not os.path.isfile(lset_name_filename):
         error = f"Preset '{lset_name}' not found "
     else:
-        missing_loras = []
 
         with open(lset_name_filename, "r", encoding="utf-8") as reader:
             text = reader.read()
         lset = json.loads(text)
 
-        loras_choices_files = lset["loras"]
-        for lora_file in loras_choices_files:
-            choice = os.path.join(lora_dir, lora_file)
-            if choice not in loras:
-                missing_loras.append(lora_file)
-            else:
-                loras_choice_no = loras.index(choice)
-                loras_choices.append(str(loras_choice_no))
-
-        if len(missing_loras) > 0:
-            error = f"Unable to apply Lora preset '{lset_name} because the following Loras files are missing or invalid: {missing_loras}"
-        
+        loras_choices = lset["loras"]
         loras_mult_choices = lset["loras_mult"]
         prompt = lset.get("prompt", "")
         full_prompt = lset.get("full_prompt", False)
@@ -2695,7 +2774,6 @@ def extract_preset(model_type, lset_name, loras):
 
 def setup_loras(model_type, transformer,  lora_dir, lora_preselected_preset, split_linear_modules_map = None):
     loras =[]
-    loras_names = []
     default_loras_choices = []
     default_loras_multis_str = ""
     loras_presets = []
@@ -2726,7 +2804,7 @@ def setup_loras(model_type, transformer,  lora_dir, lora_preselected_preset, spl
         loras = offload.load_loras_into_model(transformer, loras,  activate_all_loras=False, check_only= True, preprocess_sd=get_loras_preprocessor(transformer, model_type), split_linear_modules_map = split_linear_modules_map) #lora_multiplier,
 
     if len(loras) > 0:
-        loras_names = [ Path(lora).stem for lora in loras  ]
+        loras = [ os.path.basename(lora) for lora in loras  ]
 
     if len(lora_preselected_preset) > 0:
         if not os.path.isfile(os.path.join(lora_dir, lora_preselected_preset + ".lset")):
@@ -2735,7 +2813,7 @@ def setup_loras(model_type, transformer,  lora_dir, lora_preselected_preset, spl
         default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, _ , error = extract_preset(model_type, default_lora_preset, loras)
         if len(error) > 0:
             print(error[:200])
-    return loras, loras_names, loras_presets, default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, default_lora_preset
+    return loras, loras_presets, default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, default_lora_preset
 
 def get_transformer_model(model, submodel_no = 1):
     if submodel_no > 1:
@@ -2988,15 +3066,17 @@ def apply_changes(  state,
                     max_frames_multiplier_choice = 1,
                     display_stats_choice = 0,
                     video_output_codec_choice = None,
+                    embed_source_images_choice = None,
                     image_output_codec_choice = None,
                     audio_output_codec_choice = None,
                     last_resolution_choice = None,
+                    sliding_window_keep_only_longest_choice = False,
 ):
     if args.lock_config:
         return "<DIV ALIGN=CENTER>Config Locked</DIV>",*[gr.update()]*4
     if gen_in_progress:
         return "<DIV ALIGN=CENTER>Unable to change config when a generation is in progress</DIV>",*[gr.update()]*4
-    global offloadobj, wan_model, server_config, loras, loras_names, default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, default_lora_preset, loras_presets
+    global offloadobj, wan_model, server_config, loras, default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, default_lora_preset, loras_presets
     server_config = {
         "attention_mode" : attention_choice,  
         "transformer_types": transformer_types_choices, 
@@ -3026,8 +3106,11 @@ def apply_changes(  state,
         "max_frames_multiplier" : max_frames_multiplier_choice,
         "display_stats" : display_stats_choice,
         "video_output_codec" : video_output_codec_choice,
+        "video_container" : "mp4",  # Fixed to MP4 format
+        "embed_source_images" : embed_source_images_choice,
         "image_output_codec" : image_output_codec_choice,
         "audio_output_codec" : audio_output_codec_choice,
+        "sliding_window_keep_only_longest" : sliding_window_keep_only_longest_choice,
         "last_model_type" : state["model_type"],
         "last_model_per_family":  state["last_model_per_family"],
         "last_advanced_choice": state["advanced"], 
@@ -3073,7 +3156,7 @@ def apply_changes(  state,
         reset_prompt_enhancer()
     if all(change in ["attention_mode", "vae_config", "boost", "save_path", "metadata_type", "clear_file_list", "fit_canvas", "depth_anything_v2_variant", 
                       "notification_sound_enabled", "notification_sound_volume", "mmaudio_enabled", "max_frames_multiplier", "display_stats",
-                      "video_output_codec", "image_output_codec", "audio_output_codec"] for change in changes ):
+                      "video_output_codec", "video_container", "embed_source_images", "image_output_codec", "audio_output_codec"] for change in changes ):
         model_family = gr.Dropdown()
         model_choice = gr.Dropdown()
     else:
@@ -3191,12 +3274,21 @@ def refresh_gallery(state): #, msg
     gen = get_gen_info(state)
 
     # gen["last_msg"] = msg
-    file_list = gen.get("file_list", None)      
-    choice = gen.get("selected",0)
-    header_text = gen.get("header_text", "")
-    in_progress = "in_progress" in gen
-    if gen.get("last_selected", True) and file_list is not None:
-        choice = max(len(file_list) - 1,0)  
+    with lock:
+        file_list = gen.get("file_list", None)      
+        choice = gen.get("selected",0)
+        header_text = gen.get("header_text", "")
+        in_progress = "in_progress" in gen
+        if gen.get("last_selected", True) and file_list is not None:
+            choice = max(len(file_list) - 1,0)  
+
+        # Filter out files that don't exist to prevent Gradio errors (inside lock to prevent race conditions)
+        file_settings_list = gen.get("file_settings_list", [])
+        file_list, file_settings_list, choice = filter_existing_files(file_list, file_settings_list, choice)
+        # Update gen with filtered lists (still inside same lock)
+        if file_list is not None:
+            gen["file_list"] = file_list
+            gen["file_settings_list"] = file_settings_list
 
     queue = gen.get("queue", [])
     abort_interactive = not gen.get("abort", False)
@@ -3284,6 +3376,38 @@ def get_default_video_info():
     return "Please Select an Video / Image"    
 
 
+def filter_existing_files(file_list, file_settings_list, choice):
+    """Filter out files that don't exist from the file list to prevent Gradio errors.
+    Returns: (filtered_file_list, filtered_settings_list, adjusted_choice)
+    """
+    if file_list is None or len(file_list) == 0:
+        return file_list, file_settings_list, choice
+    
+    filtered_files = []
+    filtered_settings = []
+    
+    for i, file_path in enumerate(file_list):
+        # Extract actual path if it's a tuple
+        actual_path = file_path[0] if isinstance(file_path, tuple) else file_path
+        
+        # Check if file exists
+        if os.path.exists(actual_path):
+            filtered_files.append(file_path)
+            if file_settings_list and i < len(file_settings_list):
+                filtered_settings.append(file_settings_list[i])
+        # If file doesn't exist and it's before our selected choice, adjust choice
+        elif choice is not None and i < choice:
+            choice = max(0, choice - 1)
+    
+    # Adjust choice to be within bounds if lists changed
+    if len(filtered_files) != len(file_list):
+        if choice is not None and len(filtered_files) > 0:
+            choice = min(choice, len(filtered_files) - 1)
+        elif len(filtered_files) == 0:
+            choice = -1
+    
+    return filtered_files, filtered_settings, choice
+
 def get_file_list(state, input_file_list):
     gen = get_gen_info(state)
     with lock:
@@ -3323,6 +3447,12 @@ def select_video(state, input_file_list, event_data: gr.EventData):
     if len(file_list) > 0:
         configs = file_settings_list[choice]
         file_name = file_list[choice]
+        
+        # Check if file exists, if not return a safe default
+        if not os.path.exists(file_name):
+            gr.Warning(f"File not found: {os.path.basename(file_name)}")
+            return choice, get_default_video_info(), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+        
         values = [  os.path.basename(file_name)]
         labels = [ "File Name"]
         misc_values= []
@@ -3330,16 +3460,20 @@ def select_video(state, input_file_list, event_data: gr.EventData):
         pp_values= []
         pp_labels = []
         extension = os.path.splitext(file_name)[-1]
-        if not has_video_file_extension(file_name):
-            img = Image.open(file_name)
-            width, height = img.size
-            is_image = True
-            frames_count = fps = 1
-            nb_audio_tracks =  0 
-        else:
-            fps, width, height, frames_count = get_video_info(file_name)
-            is_image = False
-            nb_audio_tracks = extract_audio_tracks(file_name,query_only = True)
+        try:
+            if not has_video_file_extension(file_name):
+                img = Image.open(file_name)
+                width, height = img.size
+                is_image = True
+                frames_count = fps = 1
+                nb_audio_tracks =  0 
+            else:
+                fps, width, height, frames_count = get_video_info(file_name)
+                is_image = False
+                nb_audio_tracks = extract_audio_tracks(file_name,query_only = True)
+        except Exception as e:
+            gr.Warning(f"Error reading file: {os.path.basename(file_name)}")
+            return choice, get_default_video_info(), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
         if configs != None:
             video_model_name =  configs.get("type", "Unknown model")
             if "-" in video_model_name: video_model_name =  video_model_name[video_model_name.find("-")+2:] 
@@ -3459,11 +3593,13 @@ def select_video(state, input_file_list, event_data: gr.EventData):
             video_num_inference_steps = configs.get("num_inference_steps", 0)
             video_creation_date = str(get_file_creation_date(file_name))
             if "." in video_creation_date: video_creation_date = video_creation_date[:video_creation_date.rfind(".")]
-            video_generation_time =  str(configs.get("generation_time", "0")) + "s"
+            video_generation_time = format_generation_time(float(configs.get("generation_time", "0")))
             video_activated_loras = configs.get("activated_loras", [])
             video_loras_multipliers = configs.get("loras_multipliers", "")
             video_loras_multipliers =  preparse_loras_multipliers(video_loras_multipliers)
             video_loras_multipliers += [""] * len(video_activated_loras)
+
+            video_activated_loras = [ f"<span class='copy-swap' tabindex=0><SPAN class='copy-swap__trunc' >{os.path.basename(lora)}</span><span class='copy-swap__full'>{lora}</span></span>" for lora in video_activated_loras] 
             video_activated_loras = [ f"<TR><TD style='padding-top:0px;padding-left:0px'>{lora}</TD><TD>x{multiplier if len(multiplier)>0 else '1'}</TD></TR>" for lora, multiplier in zip(video_activated_loras, video_loras_multipliers) ]
             video_activated_loras_str = "<TABLE style='border:0px;padding:0px'>" + "".join(video_activated_loras) + "</TABLE>" if len(video_activated_loras) > 0 else ""
             values +=  misc_values + [video_prompt]
@@ -3480,6 +3616,19 @@ def select_video(state, input_file_list, event_data: gr.EventData):
                 labels += ["Sampler Solver"]                                        
             values += [video_resolution, video_length_summary, video_seed, video_guidance_scale, video_audio_guidance_scale, video_flow_shift, video_num_inference_steps]
             labels += [ "Resolution", video_length_label, "Seed", video_guidance_label, "Audio Guidance Scale", "Shift Scale", "Num Inference steps"]
+            video_subseed = configs.get("subseed", -1)
+            video_subseed_strength = configs.get("subseed_strength", 0.0)
+            if video_subseed_strength > 0:
+                # Show the actually used subseed if available, otherwise show the subseed value
+                subseed_used = configs.get("subseed_used", None)
+                if subseed_used is not None:
+                    subseed_display = subseed_used
+                elif video_subseed >= 0:
+                    subseed_display = video_subseed
+                else:
+                    subseed_display = "random"
+                values += [f"{subseed_display} (strength: {video_subseed_strength})"]
+                labels += ["Variation Seed"]
             video_negative_prompt = configs.get("negative_prompt", "")
             if len(video_negative_prompt) > 0:
                 values += [video_negative_prompt]
@@ -4118,15 +4267,7 @@ def get_available_filename(target_path, video_source, suffix = "", force_extensi
             return full_path
         counter += 1
 
-def set_seed(seed):
-    import random
-    seed = random.randint(0, 99999999) if seed == None or seed < 0 else seed
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    return seed
+from shared.utils.seed_management import set_seed, initialize_subseed, regenerate_subseed
 
 def edit_video(
                 send_cmd,
@@ -4167,11 +4308,8 @@ def edit_video(
     if audio_source is not None:
         audio_tracks = [audio_source]
 
-    with lock:
-        file_list = gen["file_list"]
-        file_settings_list = gen["file_settings_list"]
-
-
+    # Don't hold references to file_list - append directly to gen dicts to avoid stale references
+    # when filter_existing_files() creates new lists
 
     seed = set_seed(seed)
 
@@ -4210,7 +4348,7 @@ def edit_video(
     any_change = False
     if sample != None:
         video_path =get_available_filename(save_path, video_source, "_tmp") if any_mmaudio or has_already_audio else get_available_filename(save_path, video_source, "_post")  
-        save_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type= server_config.get("video_output_codec", None))
+        save_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type= server_config.get("video_output_codec", None), container=server_config.get("video_container", "mp4"))
 
         if any_mmaudio or has_already_audio: tmp_path = video_path
         any_change = True
@@ -4263,14 +4401,12 @@ def edit_video(
             else:
                 print(f"Postprocessed video saved to Path: "+ new_video_path)
             with lock:
-                file_list.append(new_video_path)
-                file_settings_list.append(configs)
+                gen["file_list"].append(new_video_path)
+                gen["file_settings_list"].append(configs)
 
-            if configs != None:    
-                from mutagen.mp4 import MP4
-                file = MP4(new_video_path)
-                file.tags['©cmt'] = [json.dumps(configs)]
-                file.save()        
+            if configs != None:
+                from shared.utils.video_metadata import save_metadata_to_mp4
+                save_metadata_to_mp4(new_video_path, configs)        
 
             send_cmd("output")
             seed = set_seed(-1)
@@ -4490,6 +4626,8 @@ def generate_video(
     video_length,
     batch_size,
     seed,
+    subseed,
+    subseed_strength,
     force_fps,
     num_inference_steps,
     guidance_scale,
@@ -4582,15 +4720,14 @@ def generate_video(
     processes_names = { "pose": "Open Pose", "depth": "Depth Mask", "scribble" : "Shapes", "flow" : "Flow Map", "gray" : "Gray Levels", "inpaint" : "Inpaint Mask", "identity": "Identity Mask", "raw" : "Raw Format", "canny" : "Canny Edges"}
 
     global wan_model, offloadobj, reload_needed
+    sliding_window_keep_only_longest = server_config.get("sliding_window_keep_only_longest", False)
     gen = get_gen_info(state)
     torch.set_grad_enabled(False) 
     if mode.startswith("edit_"):
         edit_video(send_cmd, state, mode, video_source, seed, temporal_upsampling, spatial_upsampling, film_grain_intensity, film_grain_saturation, MMAudio_setting, MMAudio_prompt, MMAudio_neg_prompt, repeat_generation, audio_source)
         return
-    with lock:
-        file_list = gen["file_list"]
-        file_settings_list = gen["file_settings_list"]
-
+    # Don't hold references to file_list - append directly to gen dicts to avoid stale references
+    # when filter_existing_files() creates new lists
 
     model_def = get_model_def(model_type) 
     is_image = image_mode > 0
@@ -4681,7 +4818,9 @@ def generate_video(
         loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(loras_multipliers, len(activated_loras), num_inference_steps, nb_phases = guidance_phases, merge_slist= loras_slists )
         if len(errors) > 0: raise Exception(f"Error parsing Loras: {errors}")
         lora_dir = get_lora_dir(model_type)
-        loras_selected += [ os.path.join(lora_dir, lora) for lora in activated_loras]
+        errors = check_loras_exist(model_type, activated_loras, True, send_cmd)
+        if len(errors) > 0 : raise gr.Error(errors)
+        loras_selected += [ os.path.join(lora_dir, os.path.basename(lora)) for lora in activated_loras]
 
     if len(loras_selected) > 0:
         pinnedLora = loaded_profile !=5  # and transformer_loras_filenames == None False # # # 
@@ -4698,6 +4837,9 @@ def generate_video(
     # negative_prompt = "" # not applicable in the inference
     original_filename = model_filename 
     model_filename = get_model_filename(base_model_type)  
+
+    _, _, latent_size = get_model_min_frames_and_step(model_type)  
+    video_length = (video_length -1) // latent_size * latent_size + 1
 
     current_video_length = video_length
     # VAE Tiling
@@ -4740,13 +4882,12 @@ def generate_video(
         if video_source is not None:
             current_video_length +=  sliding_window_overlap - 1
         sliding_window = current_video_length > sliding_window_size
-        reuse_frames = min(sliding_window_size - 4, sliding_window_overlap) 
+        reuse_frames = min(sliding_window_size - latent_size, sliding_window_overlap) 
     else:
         sliding_window = False
         sliding_window_size = current_video_length
         reuse_frames = 0
 
-    _, _, latent_size = get_model_min_frames_and_step(model_type)  
     original_image_refs = image_refs
     image_refs = None if image_refs is None else ([] + image_refs) # work on a copy as it is going to be modified
     # image_refs = None
@@ -4854,8 +4995,14 @@ def generate_video(
         current_video_length = min(current_video_length, length)
 
 
+    # Initialize subseed BEFORE setting main seed to ensure independent randomization
+    # (set_seed will seed the random module, making subsequent random calls deterministic)
+    subseed, original_subseed = initialize_subseed(subseed, subseed_strength)
+    print(f"[Subseed Init] Input: subseed={original_subseed}, strength={subseed_strength} → Using: subseed={subseed}")
+    
+    # Now set the main seed (this seeds random module for reproducibility)
     seed = set_seed(seed)
-
+    
     torch.set_grad_enabled(False) 
     os.makedirs(save_path, exist_ok=True)
     os.makedirs(image_save_path, exist_ok=True)
@@ -4900,6 +5047,7 @@ def generate_video(
         context_scale = None
         window_no = 0
         extra_windows = 0
+        previous_video_path = None  # Track previous video for cleanup when sliding_window_keep_only_longest is enabled
         guide_start_frame = 0 # pos of of first control video frame of current window  (reuse_frames later than the first processed frame)
         keep_frames_parsed = [] # aligned to the first control frame of current window (therefore ignore previous reuse_frames)
         pre_video_guide = None # reuse_frames of previous window
@@ -5109,7 +5257,8 @@ def generate_video(
                                                                                         block_size=block_size,
                                                                                         outpainting_dims =outpainting_dims,
                                                                                         background_ref_outpainted = model_def.get("background_ref_outpainted", True),
-                                                                                        return_tensor= model_def.get("return_image_refs_tensor", False) )
+                                                                                        return_tensor= model_def.get("return_image_refs_tensor", False),
+                                                                                        ignore_last_refs =model_def.get("no_processing_on_last_images_refs",0))
 
             frames_to_inject_parsed = frames_to_inject[ window_start_frame if extract_guide_from_window_start else guide_start_frame: guide_end_frame]
             if video_guide is not None or len(frames_to_inject_parsed) > 0 or model_def.get("forced_guide_mask_inputs", False): 
@@ -5227,6 +5376,8 @@ def generate_video(
                     embedded_guidance_scale=embedded_guidance_scale,
                     n_prompt=negative_prompt,
                     seed=seed,
+                    subseed=subseed,
+                    subseed_strength=subseed_strength,
                     callback=callback,
                     enable_RIFLEx = enable_RIFLEx,
                     VAE_tile_size = VAE_tile_size,
@@ -5393,7 +5544,11 @@ def generate_video(
                 save_prompt = original_prompts[0]
 
                 from shared.utils.utils import truncate_for_filesystem
-                extension = "jpg" if is_image else "mp4" 
+                if is_image:
+                    extension = "jpg"
+                else:
+                    container = server_config.get("video_container", "mp4")
+                    extension = container 
 
                 if os.name == 'nt':
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(truncate_for_filesystem(save_prompt,50)).strip()}.{extension}"
@@ -5413,8 +5568,14 @@ def generate_video(
                     video_path= new_image_path
                 elif len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0 or output_new_audio_filepath is not None or any_mmaudio or output_new_audio_data is not None or audio_source is not None:
                     video_path = os.path.join(save_path, file_name)
-                    save_path_tmp = video_path[:-4] + "_tmp.mp4"
-                    save_video( tensor=sample[None], save_file=save_path_tmp, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type = server_config.get("video_output_codec", None))
+                    
+                    # Delete previous video if sliding_window_keep_only_longest is enabled
+                    cleanup_previous_video(previous_video_path, gen["file_list"], gen["file_settings_list"], lock, 
+                                         sliding_window, sliding_window_keep_only_longest)
+                    
+                    container = server_config.get("video_container", "mp4")
+                    save_path_tmp = video_path.rsplit('.', 1)[0] + f"_tmp.{container}"
+                    save_video( tensor=sample[None], save_file=save_path_tmp, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type = server_config.get("video_output_codec", None), container=server_config.get("video_container", "mp4"))
                     output_new_audio_temp_filepath = None
                     new_audio_from_start =  reset_control_aligment
                     source_audio_duration = source_video_frames_count / fps
@@ -5441,7 +5602,15 @@ def generate_video(
                     if output_new_audio_temp_filepath is not None: os.remove(output_new_audio_temp_filepath)
 
                 else:
-                    save_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1),  codec_type= server_config.get("video_output_codec", None))
+                    # Delete previous video if sliding_window_keep_only_longest is enabled
+                    cleanup_previous_video(previous_video_path, gen["file_list"], gen["file_settings_list"], lock, 
+                                         sliding_window, sliding_window_keep_only_longest)
+                    
+                    # Prepare source images for embedding if enabled
+                    from shared.utils.source_image_embedding import prepare_source_images_dict
+                    source_images = prepare_source_images_dict(server_config, image_start, image_end, image_refs)
+                    
+                    save_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1),  codec_type= server_config.get("video_output_codec", None), container=server_config.get("video_container", "mp4"), source_images=source_images)
 
                 end_time = time.time()
 
@@ -5462,8 +5631,21 @@ def generate_video(
                     inputs.update({
                     "transformer_loras_filenames" : transformer_loras_filenames,
                     "transformer_loras_multipliers" : transformer_loras_multipliers
-                    })                
+                    })
+                # Preserve original subseed value (-1) in metadata if it was random
+                # This ensures next generation will also randomize instead of reusing
+                # But also save the actually used subseed for display purposes (only if strength > 0)
+                print(f"[Subseed Metadata] original_subseed={original_subseed}, inputs['subseed'] before={inputs.get('subseed', 'MISSING')}, inputs['subseed_strength']={inputs.get('subseed_strength', 'MISSING')}")
+                if original_subseed < 0 and subseed_strength > 0:
+                    actual_subseed_used = inputs["subseed"]  # Save the actual randomized value
+                    print(f"[Subseed Metadata] Preserving original random flag: changing {inputs['subseed']} → {original_subseed}, actual used: {actual_subseed_used}")
+                    inputs["subseed"] = original_subseed
+                    inputs["subseed_used"] = actual_subseed_used  # Store actual value for display
+                elif original_subseed < 0:
+                    # If strength is 0, just set subseed to -1 without storing subseed_used
+                    inputs["subseed"] = original_subseed
                 configs = prepare_inputs_dict("metadata", inputs, model_type)
+                print(f"[Subseed Metadata] After prepare_inputs_dict: configs has subseed={configs.get('subseed', 'MISSING')}, subseed_strength={configs.get('subseed_strength', 'MISSING')}")
                 if sliding_window: configs["window_no"] = window_no
                 configs["prompt"] = "\n".join(original_prompts)
                 if prompt_enhancer_image_caption_model != None and prompt_enhancer !=None and len(prompt_enhancer)>0:
@@ -5480,17 +5662,26 @@ def generate_video(
                         if is_image:
                             save_image_metadata(path, configs)
                         else:
-                            from mutagen.mp4 import MP4
-                            file = MP4(path)
-                            file.tags['©cmt'] = [json.dumps(configs)]
-                            file.save()
+                            from shared.utils.video_metadata import save_metadata_to_video
+                            try:
+                                save_metadata_to_video(path, configs)
+                            except Exception as e:
+                                print(f"Error adding metadata to MKV file {path}: {e}")
                     if is_image:
                         print(f"New image saved to Path: "+ path)
                     else:
                         print(f"New video saved to Path: "+ path)
                     with lock:
-                        file_list.append(path)
-                        file_settings_list.append(configs if no > 0 else configs.copy())
+                        gen["file_list"].append(path)
+                        gen["file_settings_list"].append(configs if no > 0 else configs.copy())
+                
+                # Update previous video path for cleanup in next iteration (only for videos, not images)
+                if should_cleanup_video(sliding_window, sliding_window_keep_only_longest, is_image):
+                    if isinstance(video_path, list):
+                        # Handle case where video_path might be a list (for images)
+                        previous_video_path = video_path[0] if len(video_path) > 0 else None
+                    else:
+                        previous_video_path = video_path
                     
                 # Play notification sound for single video
                 try:
@@ -5505,6 +5696,8 @@ def generate_video(
 
                 send_cmd("output")
 
+        # Regenerate subseed BEFORE setting new seed to ensure independent randomization
+        subseed = regenerate_subseed(original_subseed, subseed_strength)
         seed = set_seed(-1)
     clear_status(state)
     trans.cache = None
@@ -5627,7 +5820,7 @@ def process_tasks(state):
         gen["prompt_no"] = prompt_no
         task = queue[0]
         task_id = task["id"] 
-        params = task['params']
+        params = task['params'].copy()  # Make a copy to avoid param pollution between queue tasks
 
         com_stream = AsyncStream()
         send_cmd = com_stream.output_queue.push
@@ -5809,8 +6002,24 @@ def get_new_preset_msg(advanced = True):
     else:
         return "Choose a Lora Preset or a Settings file in this List"
     
-def compute_lset_choices(loras_presets):
-    # lset_choices = [ (preset, preset) for preset in loras_presets]
+def compute_lset_choices(model_type, loras_presets):
+    # top_dir = "settings"
+    global_list = []
+    if model_type is not None:
+        top_dir = get_lora_dir(model_type)
+        model_def = get_model_def(model_type)
+        settings_dir = get_model_recursive_prop(model_type, "settings_dir", return_list=False)
+        if settings_dir is None or len(settings_dir) == 0: settings_dir = [get_model_family(model_type, True)]
+        for dir in settings_dir:
+            if len(dir) == "": continue
+            cur_path = os.path.join(top_dir, dir)
+            if os.path.isdir(cur_path):
+                cur_dir_presets = glob.glob( os.path.join(cur_path, "*.json") )
+                cur_dir_presets =[ os.path.join(dir, os.path.basename(path)) for path in cur_dir_presets]
+                global_list += cur_dir_presets
+            global_list = sorted(global_list, key=lambda n: os.path.basename(n))
+
+            
     lset_list = []
     settings_list = []
     for item in loras_presets:
@@ -5822,6 +6031,9 @@ def compute_lset_choices(loras_presets):
     sep = '\u2500' 
     indent = chr(160) * 4
     lset_choices = []
+    if len(global_list) > 0:
+        lset_choices += [( (sep*16) +"Profiles" + (sep*17), ">Profiles")]
+        lset_choices += [ ( indent   + os.path.splitext(os.path.basename(preset))[0], preset) for preset in global_list ]
     if len(settings_list) > 0:
         settings_list.sort()
         lset_choices += [( (sep*16) +"Settings" + (sep*17), ">settings")]
@@ -5836,15 +6048,19 @@ def get_lset_name(state, lset_name):
     presets = state["loras_presets"]
     if len(lset_name) == 0 or lset_name.startswith(">") or lset_name== get_new_preset_msg(True) or lset_name== get_new_preset_msg(False): return ""
     if lset_name in presets: return lset_name
-    choices = compute_lset_choices(presets)
+    model_type = state["model_type"]
+    choices = compute_lset_choices(model_type, presets)
     for label, value in choices:
         if label == lset_name: return value
     return lset_name
 
 def validate_delete_lset(state, lset_name):
     lset_name = get_lset_name(state, lset_name)
-    if len(lset_name) == 0:
+    if len(lset_name) == 0 :
         gr.Info(f"Choose a Preset to delete")
+        return  gr.Button(visible= True), gr.Checkbox(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False) 
+    elif "/" in lset_name or "\\" in lset_name:
+        gr.Info(f"You can't Delete a Profile")
         return  gr.Button(visible= True), gr.Checkbox(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False) 
     else:
         return  gr.Button(visible= False), gr.Checkbox(visible= False), gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= True), gr.Button(visible= True) 
@@ -5853,6 +6069,9 @@ def validate_save_lset(state, lset_name):
     lset_name = get_lset_name(state, lset_name)
     if len(lset_name) == 0:
         gr.Info("Please enter a name for the preset")
+        return  gr.Button(visible= True), gr.Checkbox(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False),gr.Checkbox(visible= False) 
+    elif "/" in lset_name or "\\" in lset_name:
+        gr.Info(f"You can't Edit a Profile")
         return  gr.Button(visible= True), gr.Checkbox(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False),gr.Checkbox(visible= False) 
     else:
         return  gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= False), gr.Button(visible= True), gr.Button(visible= True),gr.Checkbox(visible= True)
@@ -5882,8 +6101,7 @@ def save_lset(state, lset_name, loras_choices, loras_mult_choices, prompt, save_
             lset = collect_current_model_settings(state)
             extension = ".json" 
         else:
-            loras_choices_files = [ Path(loras[int(choice_no)]).parts[-1] for choice_no in loras_choices  ]
-            lset  = {"loras" : loras_choices_files, "loras_mult" : loras_mult_choices}
+            lset  = {"loras" : loras_choices, "loras_mult" : loras_mult_choices}
             if save_lset_prompt_cbox!=1:
                 prompts = prompt.replace("\r", "").split("\n")
                 prompts = [prompt for prompt in prompts if len(prompt)> 0 and prompt.startswith("#")]
@@ -5900,7 +6118,8 @@ def save_lset(state, lset_name, loras_choices, loras_mult_choices, prompt, save_
             if not old_lset_name in loras_presets: old_lset_name = ""
         lset_name = lset_name + extension
 
-        lora_dir = get_lora_dir(state["model_type"])
+        model_type = state["model_type"]
+        lora_dir = get_lora_dir(model_type)
         full_lset_name_filename = os.path.join(lora_dir, lset_name ) 
 
         with open(full_lset_name_filename, "w", encoding="utf-8") as writer:
@@ -5923,20 +6142,21 @@ def save_lset(state, lset_name, loras_choices, loras_mult_choices, prompt, save_
             loras_presets.append(lset_name)
         state["loras_presets"] = loras_presets
 
-        lset_choices = compute_lset_choices(loras_presets)
+        lset_choices = compute_lset_choices(model_type, loras_presets)
         lset_choices.append( (get_new_preset_msg(), ""))
     return gr.Dropdown(choices=lset_choices, value= lset_name), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Button(visible= False), gr.Checkbox(visible= False)
 
 def delete_lset(state, lset_name):
     loras_presets = state["loras_presets"]
     lset_name = get_lset_name(state, lset_name)
+    model_type = state["model_type"]
     if len(lset_name) > 0:
-        lset_name_filename = os.path.join( get_lora_dir(state["model_type"]),  sanitize_file_name(lset_name))
+        lset_name_filename = os.path.join( get_lora_dir(model_type), sanitize_file_name(lset_name))
         if not os.path.isfile(lset_name_filename):
             gr.Info(f"Preset '{lset_name}' not found ")
             return [gr.update()]*7 
         os.remove(lset_name_filename)
-        lset_choices = compute_lset_choices(loras_presets)
+        lset_choices = compute_lset_choices(None, loras_presets)
         pos = next( (i for i, item in enumerate(lset_choices) if item[1]==lset_name ), -1)
         gr.Info(f"Lora Preset '{lset_name}' has been deleted")
         loras_presets.remove(lset_name)
@@ -5946,30 +6166,33 @@ def delete_lset(state, lset_name):
 
     state["loras_presets"] = loras_presets
 
-    lset_choices = compute_lset_choices(loras_presets)
+    lset_choices = compute_lset_choices(model_type, loras_presets)
     lset_choices.append((get_new_preset_msg(), ""))
     selected_lset_name = "" if pos < 0 else lset_choices[min(pos, len(lset_choices)-1)][1] 
     return  gr.Dropdown(choices=lset_choices, value= selected_lset_name), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= True), gr.Button(visible= False), gr.Checkbox(visible= False)
 
+def get_updated_loras_dropdown(loras, loras_choices):
+    loras_choices = [os.path.basename(choice) for choice in loras_choices]    
+    loras_choices_dict = { choice : True for choice in loras_choices}
+    for lora in loras:
+        loras_choices_dict.pop(lora, False)
+    new_loras = loras[:]
+    for choice, _ in loras_choices_dict.items():
+        new_loras.append(choice)    
+
+    new_loras_dropdown= [ ( os.path.splitext(choice)[0], choice) for choice in new_loras ]
+    return new_loras, new_loras_dropdown
+
 def refresh_lora_list(state, lset_name, loras_choices):
-    loras_names = state["loras_names"]
-    prev_lora_names_selected = [ loras_names[int(i)] for i in loras_choices]
     model_type= state["model_type"]
-    loras, loras_names, loras_presets, _, _, _, _  = setup_loras(model_type, None,  get_lora_dir(model_type), lora_preselected_preset, None)
-    state["loras"] = loras
-    state["loras_names"] = loras_names
+    loras, loras_presets, _, _, _, _  = setup_loras(model_type, None,  get_lora_dir(model_type), lora_preselected_preset, None)
     state["loras_presets"] = loras_presets
-
     gc.collect()
-    new_loras_choices = [ (loras_name, str(i)) for i,loras_name in enumerate(loras_names)]
-    new_loras_dict = { loras_name: str(i) for i,loras_name in enumerate(loras_names) }
-    lora_names_selected = []
-    for lora in prev_lora_names_selected:
-        lora_id = new_loras_dict.get(lora, None)
-        if lora_id!= None:
-            lora_names_selected.append(lora_id)
 
-    lset_choices = compute_lset_choices(loras_presets)
+    loras, new_loras_dropdown = get_updated_loras_dropdown(loras, loras_choices)
+    state["loras"] = loras
+    model_type = state["model_type"]    
+    lset_choices = compute_lset_choices(model_type, loras_presets)
     lset_choices.append((get_new_preset_msg( state["advanced"]), "")) 
     if not lset_name in loras_presets:
         lset_name = ""
@@ -5983,7 +6206,7 @@ def refresh_lora_list(state, lset_name, loras_choices):
             gr.Info("Lora List has been refreshed")
 
 
-    return gr.Dropdown(choices=lset_choices, value= lset_name), gr.Dropdown(choices=new_loras_choices, value= lora_names_selected) 
+    return gr.Dropdown(choices=lset_choices, value= lset_name), gr.Dropdown(choices=new_loras_dropdown, value= loras_choices) 
 
 def update_lset_type(state, lset_name):
     return 1 if lset_name.endswith(".lset") else 2
@@ -6002,30 +6225,31 @@ def apply_lset(state, wizard_prompt_activated, lset_name, loras_choices, loras_m
         if lset_name.endswith(".lset"):
             loras = state["loras"]
             loras_choices, loras_mult_choices, preset_prompt, full_prompt, error = extract_preset(current_model_type,  lset_name, loras)
-            if len(error) > 0:
-                gr.Info(error)
-            else:
-                if full_prompt:
-                    prompt = preset_prompt
-                elif len(preset_prompt) > 0:
-                    prompts = prompt.replace("\r", "").split("\n")
-                    prompts = [prompt for prompt in prompts if len(prompt)>0 and not prompt.startswith("#")]
-                    prompt = "\n".join(prompts) 
-                    prompt = preset_prompt + '\n' + prompt
-                gr.Info(f"Lora Preset '{lset_name}' has been applied")
-                state["apply_success"] = 1
-                wizard_prompt_activated = "on"
+            loras_choices = update_loras_url_cache(get_lora_dir(current_model_type), loras_choices)
+            if full_prompt:
+                prompt = preset_prompt
+            elif len(preset_prompt) > 0:
+                prompts = prompt.replace("\r", "").split("\n")
+                prompts = [prompt for prompt in prompts if len(prompt)>0 and not prompt.startswith("#")]
+                prompt = "\n".join(prompts) 
+                prompt = preset_prompt + '\n' + prompt
+            gr.Info(f"Lora Preset '{lset_name}' has been applied")
+            state["apply_success"] = 1
+            wizard_prompt_activated = "on"
 
             return wizard_prompt_activated, loras_choices, loras_mult_choices, prompt, get_unique_id(), gr.update(), gr.update(), gr.update()
         else:
-            configs, _ = get_settings_from_file(state, os.path.join(get_lora_dir(current_model_type), lset_name), True, True, True)
+            # lset_path =  os.path.join("settings", lset_name) if len(Path(lset_name).parts)>1 else os.path.join(get_lora_dir(current_model_type), lset_name)
+            lset_path =  os.path.join(get_lora_dir(current_model_type), lset_name)
+            configs, _ = get_settings_from_file(state,lset_path , True, True, True, min_settings_version=2.38)
             if configs == None:
                 gr.Info("File not supported")
-                return [gr.update()] * 7
-            
+                return [gr.update()] * 8
             model_type = configs["model_type"]
             configs["lset_name"] = lset_name
             gr.Info(f"Settings File '{lset_name}' has been applied")
+            help = configs.get("help", None)
+            if help is not None: gr.Info(help)
 
             if model_type == current_model_type:
                 set_model_settings(state, current_model_type, configs)        
@@ -6162,7 +6386,8 @@ visible= False
 def switch_advanced(state, new_advanced, lset_name):
     state["advanced"] = new_advanced
     loras_presets = state["loras_presets"]
-    lset_choices = compute_lset_choices(loras_presets)
+    model_type = state["model_type"]    
+    lset_choices = compute_lset_choices(model_type, loras_presets)
     lset_choices.append((get_new_preset_msg(new_advanced), ""))
     server_config["last_advanced_choice"] = new_advanced
     with open(server_config_filename, "w", encoding="utf-8") as writer:
@@ -6184,9 +6409,12 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
     if "loras_choices" in inputs:
         loras_choices = inputs.pop("loras_choices")
         inputs.pop("model_filename", None)
-        activated_loras = [Path( loras[int(no)]).parts[-1]  for no in loras_choices ]
-        inputs["activated_loras"] = activated_loras
-
+    else:
+        loras_choices = inputs["activated_loras"]
+    if model_type == None: model_type = state["model_type"]
+    
+    inputs["activated_loras"] = update_loras_url_cache(get_lora_dir(model_type), loras_choices)
+    
     if target == "state":
         return inputs
     
@@ -6196,7 +6424,6 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
     unsaved_params = ["image_start", "image_end", "image_refs", "video_guide", "image_guide", "video_source", "video_mask", "image_mask", "audio_guide", "audio_guide2", "audio_source"]
     for k in unsaved_params:
         inputs.pop(k)
-    if model_type == None: model_type = state["model_type"]
     inputs["type"] = get_model_record(get_model_name(model_type))  
     inputs["settings_version"] = settings_version
     model_def = get_model_def(model_type)
@@ -6384,7 +6611,7 @@ def apply_post_processing(state, input_file_list, choice, PP_temporal_upsampling
     if len(file_list) == 0 or choice == None or choice < 0 or choice > len(file_list)  :
         return gr.update(), gr.update(), gr.update()
     
-    if not file_list[choice].endswith(".mp4"):
+    if not (file_list[choice].endswith(".mp4") or file_list[choice].endswith(".mkv")):
         gr.Info("Post processing is only available with Videos")
         return gr.update(), gr.update(), gr.update()
     overrides = {
@@ -6407,7 +6634,7 @@ def remux_audio(state, input_file_list, choice, PP_MMAudio_setting, PP_MMAudio_p
     if len(file_list) == 0 or choice == None or choice < 0 or choice > len(file_list)  :
         return gr.update(), gr.update(), gr.update()
     
-    if not file_list[choice].endswith(".mp4"):
+    if not (file_list[choice].endswith(".mp4") or file_list[choice].endswith(".mkv")):
         gr.Info("Post processing is only available with Videos")
         return gr.update(), gr.update(), gr.update()
     overrides = {
@@ -6441,6 +6668,12 @@ def eject_video_from_gallery(state, input_file_list, choice):
         file_settings_list[:] = file_settings_list[:choice]
         file_settings_list.extend(extend_list)
         choice = min(choice, len(file_list))
+        
+        # Filter out files that don't exist to prevent Gradio errors (inside lock to prevent race conditions)
+        file_list, file_settings_list, choice = filter_existing_files(file_list, file_settings_list, choice)
+        gen["file_list"] = file_list
+        gen["file_settings_list"] = file_settings_list
+    
     return gr.Gallery(value = file_list, selected_index= choice), gr.update() if len(file_list) >0 else get_default_video_info(), gr.Row(visible= len(file_list) > 0)
 
 def add_videos_to_gallery(state, input_file_list, choice, files_to_load):
@@ -6479,9 +6712,18 @@ def add_videos_to_gallery(state, input_file_list, choice, files_to_load):
         if invalid_files_count > 0:
             txt += f"Unable to add {invalid_files_count} files which were invalid. " if invalid_files_count > 1 else  f"Unable to add one file which was invalid."
         gr.Info(txt)
+    
     if choice != None and choice <= 0:
         choice = len(file_list)
-        gen["selected"] = choice
+    
+    with lock:
+        # Filter out files that don't exist to prevent Gradio errors (inside lock to prevent race conditions)
+        file_list, file_settings_list, choice = filter_existing_files(file_list, file_settings_list, choice)
+        gen["file_list"] = file_list
+        gen["file_settings_list"] = file_settings_list
+        if choice != None and choice <= 0:
+            gen["selected"] = choice
+    
     return gr.Gallery(value = file_list, selected_index=choice, preview= True), gr.Files(value=[]),  gr.Tabs(selected="video_info")
 
 def get_model_settings(state, model_type):
@@ -6512,6 +6754,16 @@ def export_settings(state):
     return text_base64, sanitize_file_name(model_type + "_" + datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d-%Hh%Mm%Ss") + ".json")
 
 
+def extract_and_apply_source_images(file_path, state):
+    """UI glue: get state, call module, set state. ALL logic is in source_image_embedding module."""
+    from shared.utils.source_image_embedding import extract_and_apply_to_settings
+    current_settings = get_model_settings(state, state["model_type"]) or {}
+    updated_settings, applied_count = extract_and_apply_to_settings(file_path, current_settings)
+    if applied_count > 0:
+        set_model_settings(state, state["model_type"], updated_settings)
+    return applied_count
+
+
 def use_video_settings(state, input_file_list, choice):
     gen = get_gen_info(state)
     file_list, file_settings_list = get_file_list(state, input_file_list)
@@ -6529,12 +6781,25 @@ def use_video_settings(state, input_file_list, choice):
             defaults = get_model_settings(state, model_type) 
             defaults = get_default_settings(model_type) if defaults == None else defaults
             defaults.update(configs)
+            # For reproducibility: use the actual subseed that was used, not the random flag
+            if "subseed_used" in configs and configs.get("subseed_strength", 0.0) > 0:
+                defaults["subseed"] = configs["subseed_used"]
             prompt = configs.get("prompt", "")
+            
+            # Extract and apply embedded source images from video files
+            extracted_images = extract_and_apply_source_images(file_name, state)
+            
             set_model_settings(state, model_type, defaults)
+            
+            # Update info message to include source image extraction
             if has_image_file_extension(file_name):
                 gr.Info(f"Settings Loaded from Image with prompt '{prompt[:100]}'")
             else:
-                gr.Info(f"Settings Loaded from Video with prompt '{prompt[:100]}'")
+                info_msg = f"Settings Loaded from Video with prompt '{prompt[:100]}'"
+                if extracted_images:
+                    info_msg += f" + {extracted_images} source image(s) extracted"
+                gr.Info(info_msg)
+            
             if models_compatible:
                 return gr.update(), gr.update(), str(time.time())
             else:
@@ -6543,8 +6808,38 @@ def use_video_settings(state, input_file_list, choice):
         gr.Info(f"No Video is Selected")
 
     return gr.update(), gr.update()
+loras_url_cache = None
+def update_loras_url_cache(lora_dir, loras_selected):
+    if loras_selected is None: return None
+    global loras_url_cache
+    loras_cache_file = "loras_url_cache.json"
+    if loras_url_cache is None:
+        if os.path.isfile(loras_cache_file):
+            try:
+                with open(loras_cache_file, 'r', encoding='utf-8') as f:
+                    loras_url_cache = json.load(f)
+            except:
+                loras_url_cache = {}
+        else:
+            loras_url_cache = {}
+    new_loras_selected = []
+    update = False
+    for lora in loras_selected:
+        base_name = os.path.basename(lora)
+        local_name = os.path.join(lora_dir, base_name)
+        url = loras_url_cache.get(local_name, base_name)
+        if lora.startswith("http:") or lora.startswith("https:") and url != lora:
+            loras_url_cache[local_name]=lora
+            update = True
+        new_loras_selected.append(url)
 
-def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, switch_type_if_compatible):    
+    if update:
+        with open(loras_cache_file, "w", encoding="utf-8") as writer:
+            writer.write(json.dumps(loras_url_cache, indent=4))
+
+    return new_loras_selected
+
+def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, switch_type_if_compatible, min_settings_version = 0):    
     configs = None
     any_image_or_video = False
     if file_path.endswith(".json") and allow_json:
@@ -6553,13 +6848,12 @@ def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, sw
                 configs = json.load(f)
         except:
             pass
-    elif file_path.endswith(".mp4"):
-        from mutagen.mp4 import MP4
+    elif file_path.endswith(".mp4") or file_path.endswith(".mkv"):
+        from shared.utils.video_metadata import read_metadata_from_video
         try:
-            file = MP4(file_path)
-            tags = file.tags['©cmt'][0] 
-            configs = json.loads(tags)
-            any_image_or_video = True
+            configs = read_metadata_from_video(file_path)
+            if configs:
+                any_image_or_video = True
         except:
             pass
     elif has_image_file_extension(file_path):
@@ -6570,7 +6864,10 @@ def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, sw
             pass
     if configs is None: return None, False
     try:
-        if not "WanGP" in configs.get("type", ""): configs = None 
+        if isinstance(configs, dict):
+            if (not merge_with_defaults) and not "WanGP" in configs.get("type", ""): configs = None 
+        else:
+            configs = None
     except:
         configs = None
     if configs is None: return None, False
@@ -6590,14 +6887,22 @@ def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, sw
             model_type = current_model_type
     elif not model_type in model_types:
         model_type = current_model_type
-    fix_settings(model_type, configs)
     if switch_type_if_compatible and are_model_types_compatible(model_type,current_model_type):
         model_type = current_model_type
     if merge_with_defaults:
         defaults = get_model_settings(state, model_type) 
         defaults = get_default_settings(model_type) if defaults == None else defaults
         defaults.update(configs)
+        # For reproducibility: use the actual subseed that was used, not the random flag
+        if "subseed_used" in configs and configs.get("subseed_strength", 0.0) > 0:
+            defaults["subseed"] = configs["subseed_used"]
         configs = defaults
+
+    loras_selected =configs.get("activated_loras", None)
+    if loras_selected is not None:
+        configs["activated_loras"]= update_loras_url_cache(get_lora_dir(model_type), loras_selected)
+
+    fix_settings(model_type, configs, min_settings_version)
     configs["model_type"] = model_type
 
     return configs, any_image_or_video
@@ -6629,29 +6934,44 @@ def load_settings_from_file(state, file_path):
     gen = get_gen_info(state)
 
     if file_path==None:
-        return gr.update(), gr.update(), None
+        return gr.update(), gr.update(), None, gr.update()
 
     configs, any_video_or_image_file = get_settings_from_file(state, file_path, True, True, True)
     if configs == None:
         gr.Info("File not supported")
-        return gr.update(), gr.update(), None
+        return gr.update(), gr.update(), None, gr.update()
 
     current_model_type = state["model_type"]
     model_type = configs["model_type"]
     prompt = configs.get("prompt", "")
     is_image = configs.get("is_image", False)
 
+    # Extract and apply embedded source images from video files
+    extracted_images = 0
+    if file_path.endswith('.mkv') or file_path.endswith('.mp4'):
+        extracted_images = extract_and_apply_source_images(file_path, state)
+
     if any_video_or_image_file:    
-        gr.Info(f"Settings Loaded from {'Image' if is_image else 'Video'} generated with prompt '{prompt[:100]}'")
+        info_msg = f"Settings Loaded from {'Image' if is_image else 'Video'} generated with prompt '{prompt[:100]}'"
+        if extracted_images > 0:
+            info_msg += f" + {extracted_images} source image(s) extracted and applied"
+        gr.Info(info_msg)
     else:
         gr.Info(f"Settings Loaded from Settings file with prompt '{prompt[:100]}'")
 
     if model_type == current_model_type:
         set_model_settings(state, current_model_type, configs)        
-        return gr.update(), gr.update(), str(time.time()), None
+        return gr.update(), gr.update(), str(time.time()), gr.update()
     else:
         set_model_settings(state, model_type, configs)        
-        return *generate_dropdown_model_list(model_type), gr.update(), None
+        return *generate_dropdown_model_list(model_type), gr.update(), gr.update()
+
+def reset_settings(state):
+    model_type = state["model_type"]
+    ui_defaults = get_default_settings(model_type)
+    set_model_settings(state, model_type, ui_defaults)
+    gr.Info(f"Default Settings have been Restored")
+    return str(time.time())
 
 def save_inputs(
             target,
@@ -6664,6 +6984,8 @@ def save_inputs(
             video_length,
             batch_size,
             seed,
+            subseed,
+            subseed_strength,
             force_fps,
             num_inference_steps,
             guidance_scale,
@@ -6802,10 +7124,12 @@ def handle_celll_selection(state, evt: gr.SelectData):
         return gr.update(), gr.update(), gr.update(visible=False)
     row_index, col_index = evt.index
     cell_value = None
-    if col_index in [6, 7, 8]:
+    if col_index in [6, 7, 8, 9, 10]:
         if col_index == 6: cell_value = "↑"
         elif col_index == 7: cell_value = "↓"
-        elif col_index == 8: cell_value = "✖"
+        elif col_index == 8: cell_value = "⭱"
+        elif col_index == 9: cell_value = "⭳"
+        elif col_index == 10: cell_value = "✖"
     if col_index == 6:
         new_df_data = move_up(queue, [row_index])
         return new_df_data, gr.update(), gr.update(visible=False)
@@ -6813,6 +7137,12 @@ def handle_celll_selection(state, evt: gr.SelectData):
         new_df_data = move_down(queue, [row_index])
         return new_df_data, gr.update(), gr.update(visible=False)
     elif col_index == 8:
+        new_df_data = move_to_top(queue, [row_index])
+        return new_df_data, gr.update(), gr.update(visible=False)
+    elif col_index == 9:
+        new_df_data = move_to_bottom(queue, [row_index])
+        return new_df_data, gr.update(), gr.update(visible=False)
+    elif col_index == 10:
         new_df_data = remove_task(queue, [row_index])
         gen["prompts_max"] = gen.get("prompts_max",0) - 1
         update_status(state)
@@ -7348,6 +7678,25 @@ def get_default_value(choices, current_value, default_value = None):
             return current_value
     return default_value
 
+def download_lora(state, lora_url, progress=gr.Progress(track_tqdm=True),):
+    if lora_url is None or not lora_url.startswith("http"):
+        gr.Info("Please provide a URL for a Lora to Download")
+        return gr.update()
+    model_type = state["model_type"]
+    lora_short_name = os.path.basename(lora_url)
+    lora_dir = get_lora_dir(model_type)
+    local_path = os.path.join(lora_dir, lora_short_name)
+    try:
+        download_file(lora_url, local_path)
+    except Exception as e:
+        gr.Info(f"Error downloading Lora {lora_short_name}: {e}")
+        return gr.update()
+    update_loras_url_cache(lora_dir, [lora_url])
+    gr.Info(f"Lora {lora_short_name} has been succesfully downloaded")
+    return ""
+    
+
+
 def generate_video_tab(update_form = False, state_dict = None, ui_defaults = None, model_family = None, model_choice = None, header = None, main = None, main_tabs= None):
     global inputs_names #, advanced
 
@@ -7375,11 +7724,10 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
     model_filename = get_model_filename( base_model_type )
     preset_to_load = lora_preselected_preset if lora_preset_model == model_type else "" 
 
-    loras, loras_names, loras_presets, default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, default_lora_preset = setup_loras(model_type,  None,  get_lora_dir(model_type), preset_to_load, None)
+    loras, loras_presets, default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, default_lora_preset = setup_loras(model_type,  None,  get_lora_dir(model_type), preset_to_load, None)
 
     state_dict["loras"] = loras
     state_dict["loras_presets"] = loras_presets
-    state_dict["loras_names"] = loras_names
 
     launch_prompt = ""
     launch_preset = ""
@@ -7400,17 +7748,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
         launch_prompt = ui_defaults.get("prompt","")
     if len(launch_loras) == 0:
         launch_multis_str = ui_defaults.get("loras_multipliers","")
-        activated_loras = ui_defaults.get("activated_loras",[])
-        if len(activated_loras) > 0:
-            lora_filenames = [os.path.basename(lora_path) for lora_path in loras]
-            activated_indices = []
-            for lora_file in ui_defaults["activated_loras"]:
-                try:
-                    idx = lora_filenames.index(lora_file)
-                    activated_indices.append(str(idx))
-                except ValueError: 
-                    print(f"Warning: Lora file {lora_file} from config not found in loras directory")
-            launch_loras = activated_indices
+        launch_loras = [os.path.basename(path) for path in ui_defaults.get("activated_loras",[])]
 
     with gr.Row():
         with gr.Column():
@@ -7421,7 +7759,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 modal_image_display = gr.HTML(label="Full Resolution Image")
                 preview_column_no = gr.Text(visible=False, value=-1, elem_id="preview_column_no")
             with gr.Row(visible= True): #len(loras)>0) as presets_column:
-                lset_choices = compute_lset_choices(loras_presets) + [(get_new_preset_msg(advanced_ui), "")]
+                lset_choices = compute_lset_choices(model_type, loras_presets) + [(get_new_preset_msg(advanced_ui), "")]
                 with gr.Column(scale=6):
                     lset_name = gr.Dropdown(show_label=False, allow_custom_value= True, scale=5, filterable=True, choices= lset_choices, value=launch_preset)
                 with gr.Column(scale=1):
@@ -7449,8 +7787,6 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         delete_lset_btn = gr.Button("Delete", size="sm", min_width= 1, visible = True)
                         cancel_lset_btn = gr.Button("Don't do it !", size="sm", min_width= 1 , visible=False)  
                         #confirm_save_lset_btn, confirm_delete_lset_btn, save_lset_btn, delete_lset_btn, cancel_lset_btn
-            if not update_form:
-                state = gr.State(state_dict)     
             trigger_refresh_input_type = gr.Text(interactive= False, visible= False)
             t2v =  base_model_type in ["t2v"] 
             t2v_1_3B =  base_model_type in ["t2v_1.3B"] 
@@ -7542,7 +7878,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         else:
                             image_prompt_type_endcheckbox = gr.Checkbox( value =False, show_label= False, visible= False , scale= 1)
                 image_start_row, image_start, image_start_extra = get_image_gallery(label= "Images as starting points for new Videos in the Generation Queue", value = ui_defaults.get("image_start", None), visible= "S" in image_prompt_type_value )
-                video_source = gr.Video(label= "Video to Continue", height = gallery_height, visible= "V" in image_prompt_type_value, value= ui_defaults.get("video_source", None),)
+                video_source = gr.Video(label= "Video to Continue", height = gallery_height, visible= "V" in image_prompt_type_value, value= ui_defaults.get("video_source", None), elem_id="video_input")
                 image_end_row, image_end, image_end_extra = get_image_gallery(label= get_image_end_label(ui_defaults.get("multi_prompts_gen_type", 0)), value = ui_defaults.get("image_end", None), visible= any_letters(image_prompt_type_value, "SVL") and ("E" in image_prompt_type_value)     ) 
                 if model_mode_choices is None or image_mode_value not in model_modes_visibility:
                     model_mode = gr.Dropdown(value=None, visible=False)
@@ -7702,7 +8038,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         )
 
                 image_guide = gr.Image(label= "Control Image", height = 800, type ="pil", visible= image_mode_value==1 and "V" in video_prompt_type_value and ("U" in video_prompt_type_value or not "A" in video_prompt_type_value ) , value= ui_defaults.get("image_guide", None))
-                video_guide = gr.Video(label= "Control Video", height = gallery_height, visible= (not image_outputs) and "V" in video_prompt_type_value, value= ui_defaults.get("video_guide", None))
+                video_guide = gr.Video(label= "Control Video", height = gallery_height, visible= (not image_outputs) and "V" in video_prompt_type_value, value= ui_defaults.get("video_guide", None), elem_id="video_input")
                 if image_mode_value >= 1:  
                     image_guide_value = ui_defaults.get("image_guide", None)
                     image_mask_value = ui_defaults.get("image_mask", None)
@@ -7900,7 +8236,9 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 with gr.Tab("General"):
                     with gr.Column():
                         with gr.Row():                        
-                            seed = gr.Slider(-1, 999999999, value=ui_defaults.get("seed",-1), step=1, label="Seed (-1 for random)", scale=2) 
+                            seed = gr.Slider(-1, 999999999, value=ui_defaults.get("seed",-1), step=1, label="Seed (-1 for random)", scale=2)
+                            random_seed_btn = gr.Button("🎲", size="sm", min_width=40, scale=0)
+                            reuse_seed_btn = gr.Button("♻️", size="sm", min_width=40, scale=0)
                             guidance_phases_value = ui_defaults.get("guidance_phases", 1) 
                             guidance_phases = gr.Dropdown(
                                 choices=[
@@ -7912,6 +8250,15 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                                 visible= guidance_max_phases >=2,
                                 interactive = not model_def.get("lock_guidance_phases", False)
                             )
+                        # Auto-check Extra checkbox if loading settings with subseed data
+                        # Only check if subseed_strength > 0, since that indicates variation was actually used
+                        has_subseed_data = ui_defaults.get("subseed_strength", 0.0) > 0
+                        seed_extras_checkbox = gr.Checkbox(label="Extra Seed Options", value=has_subseed_data)
+                        with gr.Row(visible=has_subseed_data) as seed_extras_row:
+                            subseed = gr.Slider(-1, 999999999, value=ui_defaults.get("subseed", -1), step=1, label="Variation Seed (-1 for random)", scale=2)
+                            random_subseed_btn = gr.Button("🎲", size="sm", min_width=40, scale=0)
+                            reuse_subseed_btn = gr.Button("♻️", size="sm", min_width=40, scale=0)
+                            subseed_strength = gr.Slider(0.0, 1.0, value=ui_defaults.get("subseed_strength", 0.0), step=0.01, label="Variation Strength", scale=1)
                         with gr.Row(visible = guidance_phases_value >=2 ) as guidance_phases_row:
                             multiple_submodels = model_def.get("multiple_submodels", False)
                             model_switch_phase = gr.Dropdown(
@@ -7967,13 +8314,14 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 with gr.Tab("Loras"):
                     with gr.Column(visible = True): #as loras_column:
                         gr.Markdown("<B>Loras can be used to create special effects on the video by mentioning a trigger word in the Prompt. You can save Loras combinations in presets.</B>")
+                        loras, loras_choices = get_updated_loras_dropdown(loras, launch_loras)
+                        state_dict["loras"] = loras
                         loras_choices = gr.Dropdown(
-                            choices=[
-                                (lora_name, str(i) ) for i, lora_name in enumerate(loras_names)
-                            ],
+                            choices=loras_choices,
                             value= launch_loras,
                             multiselect= True,
-                            label="Activated Loras"
+                            label="Activated Loras",
+                            allow_custom_value= True,
                         )
                         loras_multipliers = gr.Textbox(label="Loras Multipliers (1.0 by default) separated by Space chars or CR, lines that start with # are ignored", value=launch_multis_str)
                 with gr.Tab("Steps Skipping", visible = any_tea_cache or any_mag_cache) as speed_tab:
@@ -8259,15 +8607,21 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             with gr.Row():
                 save_settings_btn = gr.Button("Set Settings as Default", visible = not args.lock_config)
                 export_settings_from_file_btn = gr.Button("Export Settings to File")
+                reset_settings_btn = gr.Button("Reset Settings")
             with gr.Row():
                 settings_file = gr.File(height=41,label="Load Settings From Video / Image / JSON")
                 settings_base64_output = gr.Text(interactive= False, visible=False, value = "")
                 settings_filename =  gr.Text(interactive= False, visible=False, value = "")
-            
+            with gr.Group():
+                with gr.Row():
+                    lora_url = gr.Text(label ="Lora URL", placeholder= "Enter Lora URL", scale=4, show_label=False, elem_classes="compact_text" )
+                    download_lora_btn = gr.Button("Download Lora", scale=1, min_width=10)
+        
             mode = gr.Text(value="", visible = False)
 
         with gr.Column():
             if not update_form:
+                state = gr.State(state_dict)     
                 gen_status = gr.Text(interactive= False, label = "Status")
                 status_trigger = gr.Text(interactive= False, visible=False)
                 default_files = []
@@ -8344,11 +8698,11 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 with gr.Accordion("Queue Management", open=False) as queue_accordion:
                     with gr.Row( ): 
                         queue_df = gr.DataFrame(
-                            headers=["Qty","Prompt", "Length","Steps","", "", "", "", ""],
-                            datatype=[ "str","markdown","str", "markdown", "markdown", "markdown", "str", "str", "str"],
-                            column_widths= ["5%", None, "7%", "7%", "10%", "10%", "3%", "3%", "34"],
+                            headers=["Qty","Prompt", "Length","Steps","", "", "", "", "", "", ""],
+                            datatype=[ "str","markdown","str", "markdown", "markdown", "markdown", "str", "str", "str", "str", "str"],
+                            column_widths= ["5%", None, "7%", "7%", "10%", "10%", "3%", "3%", "30", "30", "34"],
                             interactive=False,
-                            col_count=(9, "fixed"),
+                            col_count=(11, "fixed"),
                             wrap=True,
                             value=[],
                             line_breaks= True,
@@ -8380,7 +8734,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                                       video_buttons_row, image_buttons_row, video_postprocessing_tab, audio_remuxing_tab, PP_MMAudio_row, PP_custom_audio_row, 
                                       video_info_to_start_image_btn, video_info_to_end_image_btn, video_info_to_reference_image_btn, video_info_to_image_guide_btn, video_info_to_image_mask_btn,
                                       NAG_col, remove_background_sound , speakers_locations_row, embedded_guidance_row, guidance_phases_row, guidance_row, resolution_group, cfg_free_guidance_col, control_net_weights_row, guide_selection_row, image_mode_tabs, 
-                                      min_frames_if_references_col, video_prompt_type_alignment, prompt_enhancer_btn, tab_inpaint, tab_t2v] + image_start_extra + image_end_extra + image_refs_extra #  presets_column,
+                                      min_frames_if_references_col, video_prompt_type_alignment, prompt_enhancer_btn, tab_inpaint, tab_t2v, seed_extras_checkbox] + image_start_extra + image_end_extra + image_refs_extra #  presets_column,
         if update_form:
             locals_dict = locals()
             gen_inputs = [state_dict if k=="state" else locals_dict[k]  for k in inputs_names] + [state_dict] + extra_inputs
@@ -8397,6 +8751,37 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             # video_length.release(fn=refresh_video_length_label, inputs=[state, video_length ], outputs = video_length, trigger_mode="always_last" )
             gr.on(triggers=[video_length.release, force_fps.change, video_guide.change, video_source.change], fn=refresh_video_length_label, inputs=[state, video_length, force_fps, video_guide, video_source] , outputs = video_length, trigger_mode="always_last", show_progress="hidden"  )
             guidance_phases.change(fn=change_guidance_phases, inputs= [state, guidance_phases], outputs =[model_switch_phase, guidance_phases_row, switch_threshold, switch_threshold2, guidance2_scale, guidance3_scale ])
+            
+            def toggle_seed_extras(checked):
+                """Toggle seed extras visibility and reset subseed_strength when unchecked"""
+                if checked:
+                    return gr.update(visible=True), gr.update()
+                else:
+                    # Reset subseed_strength to 0 when unchecking to disable variation
+                    return gr.update(visible=False), gr.update(value=0.0)
+            
+            seed_extras_checkbox.change(fn=toggle_seed_extras, inputs=[seed_extras_checkbox], outputs=[seed_extras_row, subseed_strength], show_progress=False)
+            
+            # Seed button handlers
+            random_seed_btn.click(fn=lambda: -1, inputs=[], outputs=[seed], show_progress=False)
+            random_subseed_btn.click(fn=lambda: -1, inputs=[], outputs=[subseed], show_progress=False)
+            
+            def get_last_seed_from_state(state, is_subseed=False):
+                gen = get_gen_info(state)
+                file_list = gen.get("file_list", [])
+                if not file_list:
+                    return -1
+                # Get the most recent file
+                last_file = file_list[-1]
+                file_settings = gen.get("file_settings_list", [{}])[-1] if gen.get("file_settings_list") else {}
+                if is_subseed:
+                    return file_settings.get("subseed", -1)
+                else:
+                    return file_settings.get("seed", -1)
+            
+            reuse_seed_btn.click(fn=lambda s: get_last_seed_from_state(s, False), inputs=[state], outputs=[seed], show_progress=False)
+            reuse_subseed_btn.click(fn=lambda s: get_last_seed_from_state(s, True), inputs=[state], outputs=[subseed], show_progress=False)
+            
             audio_prompt_type_remux.change(fn=refresh_audio_prompt_type_remux, inputs=[state, audio_prompt_type, audio_prompt_type_remux], outputs=[audio_prompt_type])
             remove_background_sound.change(fn=refresh_remove_background_sound, inputs=[state, audio_prompt_type, remove_background_sound], outputs=[audio_prompt_type])
             audio_prompt_type_sources.change(fn=refresh_audio_prompt_type_sources, inputs=[state, audio_prompt_type, audio_prompt_type_sources], outputs=[audio_prompt_type, audio_guide, audio_guide2, speakers_locations_row, remove_background_sound])
@@ -8420,9 +8805,12 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             show_advanced.change(fn=switch_advanced, inputs=[state, show_advanced, lset_name], outputs=[advanced_row, preset_buttons_rows, refresh_lora_btn, refresh2_row ,lset_name]).then(
                 fn=switch_prompt_type, inputs = [state, wizard_prompt_activated_var, wizard_variables_var, prompt, wizard_prompt, *prompt_vars], outputs = [wizard_prompt_activated_var, wizard_variables_var, prompt, wizard_prompt, prompt_column_advanced, prompt_column_wizard, prompt_column_wizard_vars, *prompt_vars])
             queue_df.select( fn=handle_celll_selection, inputs=state, outputs=[queue_df, modal_image_display, modal_container])
-            gr.on( triggers=[output.change, output.select], fn=select_video, inputs=[state, output], outputs=[last_choice, video_info, video_buttons_row, image_buttons_row, video_postprocessing_tab, audio_remuxing_tab], show_progress="hidden")
+            # Don't pass Gallery as input to avoid Gradio cache errors with generated files
+            # The file list is already stored in state, so we pass None for input_file_list
+            gr.on( triggers=[output.change, output.select], fn=select_video, inputs=[state, gr.State(None)], outputs=[last_choice, video_info, video_buttons_row, image_buttons_row, video_postprocessing_tab, audio_remuxing_tab], show_progress="hidden")
             preview_trigger.change(refresh_preview, inputs= [state], outputs= [preview], show_progress="hidden")
             PP_MMAudio_setting.change(fn = lambda value : [gr.update(visible = value == 1), gr.update(visible = value == 0)] , inputs = [PP_MMAudio_setting], outputs = [PP_MMAudio_row, PP_custom_audio_row] )
+            download_lora_btn.click(fn=download_lora, inputs = [state, lora_url], outputs = [lora_url]).then(fn=refresh_lora_list, inputs=[state, lset_name,loras_choices], outputs=[lset_name, loras_choices])
             def refresh_status_async(state, progress=gr.Progress()):
                 gen = get_gen_info(state)
                 gen["progress"] = progress
@@ -8433,7 +8821,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         progress(*progress_args)
                         gen["progress_args"] = None
                     status= gen.get("status","")
-                    if status == None or len(status) > 0:
+                    if status is not None and len(status) > 0:
                         yield status
                         gen["status"]= ""
                     if not gen.get("status_display", False):
@@ -8500,17 +8888,18 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             main_tabs.select(fn=detect_auto_save_form, inputs= [state], outputs= save_form_trigger, trigger_mode="multiple")
 
 
-            video_info_add_videos_btn.click(fn=add_videos_to_gallery, inputs =[state, output, last_choice, files_to_load], outputs = [output, files_to_load, video_info_tabs] )
-            gr.on(triggers=[video_info_eject_video_btn.click, video_info_eject_video2_btn.click, video_info_eject_video3_btn.click, video_info_eject_image_btn.click], fn=eject_video_from_gallery, inputs =[state, output, last_choice], outputs = [output, video_info, video_buttons_row] )
-            video_info_to_control_video_btn.click(fn=video_to_control_video, inputs =[state, output, last_choice], outputs = [video_guide] )
-            video_info_to_video_source_btn.click(fn=video_to_source_video, inputs =[state, output, last_choice], outputs = [video_source] )
-            video_info_to_start_image_btn.click(fn=image_to_ref_image_add, inputs =[state, output, last_choice, image_start, gr.State("Start Image")], outputs = [image_start] )
-            video_info_to_end_image_btn.click(fn=image_to_ref_image_add, inputs =[state, output, last_choice, image_end, gr.State("End Image")], outputs = [image_end] )
-            video_info_to_image_guide_btn.click(fn=image_to_ref_image_guide, inputs =[state, output, last_choice], outputs = [image_guide, image_mask_guide]).then(fn=None, inputs=[], outputs=[], js=click_brush_js )
-            video_info_to_image_mask_btn.click(fn=image_to_ref_image_set, inputs =[state, output, last_choice, image_mask, gr.State("Image Mask")], outputs = [image_mask] )
-            video_info_to_reference_image_btn.click(fn=image_to_ref_image_add, inputs =[state, output, last_choice, image_refs, gr.State("Ref Image")],  outputs = [image_refs] )
-            video_info_postprocessing_btn.click(fn=apply_post_processing, inputs =[state, output, last_choice, PP_temporal_upsampling, PP_spatial_upsampling, PP_film_grain_intensity, PP_film_grain_saturation], outputs = [mode, generate_trigger, add_to_queue_trigger ] )
-            video_info_remux_audio_btn.click(fn=remux_audio, inputs =[state, output, last_choice, PP_MMAudio_setting, PP_MMAudio_prompt, PP_MMAudio_neg_prompt, PP_MMAudio_seed, PP_repeat_generation, PP_custom_audio], outputs = [mode, generate_trigger, add_to_queue_trigger ] )
+            # Pass None instead of Gallery to avoid Gradio cache errors with generated files
+            video_info_add_videos_btn.click(fn=add_videos_to_gallery, inputs =[state, gr.State(None), last_choice, files_to_load], outputs = [output, files_to_load, video_info_tabs] )
+            gr.on(triggers=[video_info_eject_video_btn.click, video_info_eject_video2_btn.click, video_info_eject_video3_btn.click, video_info_eject_image_btn.click], fn=eject_video_from_gallery, inputs =[state, gr.State(None), last_choice], outputs = [output, video_info, video_buttons_row] )
+            video_info_to_control_video_btn.click(fn=video_to_control_video, inputs =[state, gr.State(None), last_choice], outputs = [video_guide] )
+            video_info_to_video_source_btn.click(fn=video_to_source_video, inputs =[state, gr.State(None), last_choice], outputs = [video_source] )
+            video_info_to_start_image_btn.click(fn=image_to_ref_image_add, inputs =[state, gr.State(None), last_choice, image_start, gr.State("Start Image")], outputs = [image_start] )
+            video_info_to_end_image_btn.click(fn=image_to_ref_image_add, inputs =[state, gr.State(None), last_choice, image_end, gr.State("End Image")], outputs = [image_end] )
+            video_info_to_image_guide_btn.click(fn=image_to_ref_image_guide, inputs =[state, gr.State(None), last_choice], outputs = [image_guide, image_mask_guide]).then(fn=None, inputs=[], outputs=[], js=click_brush_js )
+            video_info_to_image_mask_btn.click(fn=image_to_ref_image_set, inputs =[state, gr.State(None), last_choice, image_mask, gr.State("Image Mask")], outputs = [image_mask] )
+            video_info_to_reference_image_btn.click(fn=image_to_ref_image_add, inputs =[state, gr.State(None), last_choice, image_refs, gr.State("Ref Image")],  outputs = [image_refs] )
+            video_info_postprocessing_btn.click(fn=apply_post_processing, inputs =[state, gr.State(None), last_choice, PP_temporal_upsampling, PP_spatial_upsampling, PP_film_grain_intensity, PP_film_grain_saturation], outputs = [mode, generate_trigger, add_to_queue_trigger ] )
+            video_info_remux_audio_btn.click(fn=remux_audio, inputs =[state, gr.State(None), last_choice, PP_MMAudio_setting, PP_MMAudio_prompt, PP_MMAudio_neg_prompt, PP_MMAudio_seed, PP_repeat_generation, PP_custom_audio], outputs = [mode, generate_trigger, add_to_queue_trigger ] )
             save_lset_btn.click(validate_save_lset, inputs=[state, lset_name], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_save_lset_btn, cancel_lset_btn, save_lset_prompt_drop])
             delete_lset_btn.click(validate_delete_lset, inputs=[state, lset_name], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_delete_lset_btn, cancel_lset_btn ])
             confirm_save_lset_btn.click(fn=validate_wizard_prompt, inputs =[state, wizard_prompt_activated_var, wizard_variables_var, prompt, wizard_prompt, *prompt_vars] , outputs= [prompt], show_progress="hidden",).then(
@@ -8563,6 +8952,17 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             ).then(fn=load_settings_from_file, inputs =[state, settings_file] , outputs= [model_family, model_choice, refresh_form_trigger, settings_file])
 
 
+            reset_settings_btn.click(fn=validate_wizard_prompt,
+                inputs= [state, wizard_prompt_activated_var, wizard_variables_var,  prompt, wizard_prompt, *prompt_vars] ,
+                outputs= [prompt],
+                show_progress="hidden",
+            ).then(fn=save_inputs,
+                inputs =[target_state] + gen_inputs,
+                outputs= None
+            ).then(fn=reset_settings, inputs =[state] , outputs= [refresh_form_trigger])
+
+ 
+
             fill_wizard_prompt_trigger.change(
                 fn = fill_wizard_prompt, inputs = [state, wizard_prompt_activated_var, prompt, wizard_prompt], outputs = [ wizard_prompt_activated_var, wizard_variables_var, prompt, wizard_prompt, prompt_column_advanced, prompt_column_wizard, prompt_column_wizard_vars, *prompt_vars]
             )
@@ -8598,7 +8998,8 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 inputs=[state],
                 outputs=[gen_status])
             
-            generate_btn.click(fn = init_generate, inputs = [state, output, last_choice], outputs=[generate_trigger, mode])
+            # Pass None instead of Gallery to avoid Gradio cache errors with generated files
+            generate_btn.click(fn = init_generate, inputs = [state, gr.State(None), last_choice], outputs=[generate_trigger, mode])
 
             generate_trigger.change(fn=validate_wizard_prompt,
                 inputs= [state, wizard_prompt_activated_var, wizard_variables_var,  prompt, wizard_prompt, *prompt_vars] ,
@@ -8876,6 +9277,15 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                     label="User Interface Theme. You will need to restart the App the see new Theme."
                 )
 
+                sliding_window_keep_only_longest_choice = gr.Dropdown(
+                    choices=[
+                        ("Disabled", False),
+                        ("Enabled", True),
+                    ],
+                    value=server_config.get("sliding_window_keep_only_longest", False),
+                    label="Sliding Window Video Cleanup Policy (automatically deletes shorter intermediate videos during generation)"
+                )
+
 
             with gr.Tab("Performance"):
 
@@ -9021,6 +9431,12 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                     label="Video Codec to use"
                 )
 
+                embed_source_images_choice = gr.Checkbox(
+                    value=server_config.get("embed_source_images", False),
+                    label="Embed Source Images",
+                    info="Saves i2v source images inside MP4 files"
+                )
+
                 image_output_codec_choice = gr.Dropdown(
                     choices=[
                         ("JPEG Quality 85", 'jpeg_85'),
@@ -9109,9 +9525,11 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                     max_frames_multiplier_choice,
                     display_stats_choice,
                     video_output_codec_choice,
+                    embed_source_images_choice,
                     image_output_codec_choice,
                     audio_output_codec_choice,
                     resolution,
+                    sliding_window_keep_only_longest_choice,
                 ],
                 outputs= [msg , header, model_family, model_choice, refresh_form_trigger]
         )
@@ -9678,6 +10096,32 @@ def create_ui():
         }
         .btn_centered {margin-top:10px; text-wrap-mode: nowrap;}
         .cbx_centered label {margin-top:8px; text-wrap-mode: nowrap;}
+
+        .copy-swap { display:block; max-width:100%; 
+        }
+        .copy-swap__trunc {
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        }
+        .copy-swap__full { display: none; }
+        .copy-swap:hover .copy-swap__trunc,
+        .copy-swap:focus-within .copy-swap__trunc { display: none; }
+        .copy-swap:hover .copy-swap__full,
+        .copy-swap:focus-within .copy-swap__full {
+        display: inline;
+        white-space: normal;
+        user-select: text;
+        }
+        .compact_text {padding: 1px}
+        #video_input .video-container .container {
+            flex-direction: row !important;
+            display: flex !important;
+        }
+        #video_input .video-container .container .controls {
+            overflow: visible !important;
+        }
     """
     UI_theme = server_config.get("UI_theme", "default")
     UI_theme  = args.theme if len(args.theme) > 0 else UI_theme

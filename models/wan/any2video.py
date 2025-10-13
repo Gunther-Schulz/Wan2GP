@@ -33,6 +33,7 @@ from shared.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .modules.posemb_layers import get_rotary_pos_embed, get_nd_rotary_pos_embed
 from shared.utils.vace_preprocessor import VaceVideoProcessor
 from shared.utils.basic_flowmatch import FlowMatchScheduler
+from shared.utils.lcm_scheduler import LCMScheduler
 from shared.utils.utils import get_outpainting_frame_location, resize_lanczos, calculate_new_dimensions, convert_image_to_tensor, fit_image_into_canvas
 from .multitalk.multitalk_utils import MomentumBuffer, adaptive_projected_guidance, match_and_blend_colors, match_and_blend_colors_with_mask
 from shared.utils.audio_video import save_video
@@ -401,6 +402,17 @@ class WanAny2V:
             timesteps = torch.tensor([1000, 934, 862, 756, 603, 410, 250, 140, 74])[:sampling_steps].to(self.device)
             sample_scheduler.timesteps =timesteps
             sample_scheduler.sigmas = torch.cat([sample_scheduler.timesteps / 1000, torch.tensor([0.], device=self.device)])
+        elif sample_solver == 'lcm':
+            # LCM + LTX scheduler: Latent Consistency Model with RectifiedFlow
+            # Optimized for Lightning LoRAs with ultra-fast 2-8 step inference
+            effective_steps = min(sampling_steps, 8)  # LCM works best with few steps
+            sample_scheduler = LCMScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                num_inference_steps=effective_steps,
+                shift=shift
+            )
+            sample_scheduler.set_timesteps(effective_steps, device=self.device, shift=shift)
+            timesteps = sample_scheduler.timesteps
         elif sample_solver == 'unipc' or sample_solver == "":
             sample_scheduler = FlowUniPCMultistepScheduler( num_train_timesteps=self.num_train_timesteps, shift=1, use_dynamic_shifting=False)
             sample_scheduler.set_timesteps( sampling_steps, device=self.device, shift=shift)

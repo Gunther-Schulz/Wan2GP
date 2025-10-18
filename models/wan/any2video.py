@@ -28,8 +28,6 @@ from .modules.vae2_2 import Wan2_2_VAE
 from .modules.clip import CLIPModel
 from shared.utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps, bong_tangent_scheduler)
-from shared.utils.res_samplers import get_res_2s_sigmas, get_res_3s_sigmas
-from shared.utils.res_samplers.res_wan_adapter import create_res_adapter
 from shared.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .modules.posemb_layers import get_rotary_pos_embed, get_nd_rotary_pos_embed
 from shared.utils.vace_preprocessor import VaceVideoProcessor
@@ -454,22 +452,6 @@ class WanAny2V:
                 sample_scheduler,
                 device=self.device,
                 sigmas=sampling_sigmas)
-        elif sample_solver == 'res_2s':
-            # TRUE RES_2S: 2-stage exponential integrator with φ-functions
-            # Creates RES adapter that handles custom RK stepping
-            sample_scheduler = None  # RES uses custom stepping, not scheduler
-            sampling_sigmas = get_res_2s_sigmas(sampling_steps, shift=shift)
-            # Convert sigmas to timesteps (multiply by 1000)
-            # Use float32 dtype to match model weights
-            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device, dtype=torch.float32)
-        elif sample_solver == 'res_3s':
-            # TRUE RES_3S: 3-stage exponential integrator with φ-functions
-            # Creates RES adapter that handles custom RK stepping  
-            sample_scheduler = None  # RES uses custom stepping, not scheduler
-            sampling_sigmas = get_res_3s_sigmas(sampling_steps, shift=shift)
-            # Convert sigmas to timesteps (multiply by 1000)
-            # Use float32 dtype to match model weights
-            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device, dtype=torch.float32)
         else:
             raise NotImplementedError(f"Unsupported Scheduler {sample_solver}")
         original_timesteps = timesteps
@@ -1093,30 +1075,6 @@ class WanAny2V:
                 dt = timesteps[i] if i == len(timesteps)-1 else (timesteps[i] - timesteps[i + 1])
                 dt = dt.item() / self.num_timesteps
                 latents = latents - noise_pred * dt
-            elif sample_solver in ['res_2s', 'res_3s']:
-                # TRUE RES: Use exponential integrator with custom stepping
-                # Initialize RES adapter on first step with CFG support
-                if i == 0:
-                    res_adapter = create_res_adapter(
-                        trans, 
-                        rk_type=sample_solver, 
-                        guide_scale=guide_scale,
-                        joint_pass=joint_pass and any_guidance
-                    )
-                
-                # Get next timestep (or 0 for last step)
-                t_next = timesteps[i + 1] if i < len(timesteps) - 1 else torch.tensor([0.0], device=self.device)
-                
-                # RES handles model calling internally (for RK stages)
-                # CFG is applied inside the adapter for each stage
-                # We pass gen_args and kwargs so it can call the model
-                latents = res_adapter.step(
-                    latents=latents,
-                    current_timestep=t,
-                    next_timestep=t_next,
-                    gen_args=gen_args,
-                    kwargs=kwargs
-                )
             else:
                 latents = sample_scheduler.step(
                     noise_pred[:, :, :target_shape[1]],

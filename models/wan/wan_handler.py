@@ -124,8 +124,6 @@ class family_handler():
                             ("dpm++", "dpm++"),
                             ("Bongo Tangent (LCM)", "bong_tangent"),
                             ("Bongo Tangent (DPM++)", "bong_dpm"),
-                            ("RES 2S (Lightning 2x)", "res_2s"),
-                            ("RES 3S (Lightning 3x)", "res_3s"),
                             ("flowmatch causvid", "causvid"),
                             ("lcm + ltx", "lcm"), ]
         })

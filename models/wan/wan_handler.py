@@ -180,7 +180,7 @@ class family_handler():
                             ("euler", "euler"),
                             ("dpm++", "dpm++"),
                             ("flowmatch causvid", "causvid"),
-                            ("LCM", "lcm"), ]
+                            ("lcm", "lcm"), ]
         })
 
 

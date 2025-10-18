@@ -27,7 +27,7 @@ from .modules.vae2_2 import Wan2_2_VAE
 
 from .modules.clip import CLIPModel
 from shared.utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
-                              get_sampling_sigmas, retrieve_timesteps)
+                              get_sampling_sigmas, retrieve_timesteps, bong_tangent_scheduler)
 from shared.utils.seed_management import create_generator, create_subseed_generator, apply_subseed_variation
 from shared.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .modules.posemb_layers import get_rotary_pos_embed, get_nd_rotary_pos_embed
@@ -412,6 +412,16 @@ class WanAny2V:
                 shift=1,
                 use_dynamic_shifting=False)
             sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler,
+                device=self.device,
+                sigmas=sampling_sigmas)
+        elif sample_solver == 'bong_tangent':
+            sample_scheduler = FlowDPMSolverMultistepScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                shift=1,
+                use_dynamic_shifting=False)
+            sampling_sigmas = bong_tangent_scheduler(sampling_steps)
             timesteps, _ = retrieve_timesteps(
                 sample_scheduler,
                 device=self.device,

@@ -122,6 +122,7 @@ class family_handler():
                             ("unipc", "unipc"),
                             ("euler", "euler"),
                             ("dpm++", "dpm++"),
+                            ("Bongo Tangent (LCM)", "bong_tangent"),
                             ("flowmatch causvid", "causvid"), ]
         })
 

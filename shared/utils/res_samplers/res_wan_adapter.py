@@ -61,10 +61,22 @@ class RESWanAdapter:
         kwargs_copy = kwargs.copy()
         kwargs_copy.update({"t": timestep})
         
+        # CRITICAL: Update gen_args with current latent state
+        # gen_args contains 'x' which is a list of latents for CFG
+        # We need to update all of them with the current x value
+        gen_args_copy = gen_args.copy()
+        if 'x' in gen_args_copy:
+            # Replace all x values in the list with current x
+            x_list = gen_args_copy['x']
+            if isinstance(x_list, list):
+                gen_args_copy['x'] = [x for _ in range(len(x_list))]
+            else:
+                gen_args_copy['x'] = x
+        
         # Call model to get noise prediction
         # Model returns noise, we need to convert to denoised
         with torch.no_grad():
-            noise_pred = self.model(**gen_args, **kwargs_copy)
+            noise_pred = self.model(**gen_args_copy, **kwargs_copy)
         
         # Flow matching: x = signal + sigma * noise
         # So: signal = x - sigma * noise

@@ -1,5 +1,5 @@
 """
-LCM + LTX scheduler combining Latent Consistency Model with RectifiedFlow (LTX).
+LCM scheduler using Latent Consistency Model with RectifiedFlow.
 Optimized for Lightning LoRA compatibility and ultra-fast inference.
 """
 
@@ -10,9 +10,9 @@ from diffusers.schedulers.scheduling_utils import SchedulerMixin, SchedulerOutpu
 
 class LCMScheduler(SchedulerMixin):
     """
-    LCM + LTX scheduler combining Latent Consistency Model with RectifiedFlow.
+    LCM scheduler using Latent Consistency Model with RectifiedFlow.
     - LCM: Enables 2-8 step inference with consistency models
-    - LTX: Uses RectifiedFlow for better flow matching dynamics
+    - RectifiedFlow: Flow matching dynamics for optimal probability paths
     Optimized for Lightning LoRAs and ultra-fast, high-quality generation.
     """
     
@@ -23,18 +23,18 @@ class LCMScheduler(SchedulerMixin):
         self._step_index = None
         
     def set_timesteps(self, num_inference_steps: int, device=None, shift: float = None, **kwargs):
-        """Set timesteps for LCM+LTX inference using RectifiedFlow approach"""
+        """Set timesteps for LCM inference using RectifiedFlow approach"""
         self.num_inference_steps = min(num_inference_steps, 8)  # LCM works best with 2-8 steps
         
         if shift is None:
             shift = self.shift
             
-        # RectifiedFlow (LTX) approach: Use rectified flow dynamics for better sampling
+        # RectifiedFlow approach: Use rectified flow dynamics for better sampling
         # This creates a more optimal path through the probability flow ODE
         t = torch.linspace(0, 1, self.num_inference_steps + 1, dtype=torch.float32)
         
         # Apply rectified flow transformation for better dynamics
-        # This is the key LTX component - rectified flow scheduling
+        # This is the key component - rectified flow scheduling
         sigma_max = 1.0
         sigma_min = 0.003 / 1.002
         
@@ -55,9 +55,9 @@ class LCMScheduler(SchedulerMixin):
         
     def step(self, model_output: torch.Tensor, timestep: torch.Tensor, sample: torch.Tensor, **kwargs) -> SchedulerOutput:
         """
-        Perform LCM + LTX step combining consistency model with rectified flow.
+        Perform LCM step combining consistency model with rectified flow.
         - LCM: Direct consistency model prediction for fast inference
-        - LTX: RectifiedFlow dynamics for optimal probability flow path
+        - RectifiedFlow: Flow matching dynamics for optimal probability flow path
         """
         if self._step_index is None:
             self._init_step_index(timestep)
@@ -69,12 +69,12 @@ class LCMScheduler(SchedulerMixin):
         else:
             sigma_next = torch.zeros_like(sigma)
         
-        # LCM + LTX: Combine consistency model approach with rectified flow dynamics
+        # LCM with RectifiedFlow: Combine consistency model approach with rectified flow dynamics
         # The model_output represents the velocity field in the rectified flow ODE
         # LCM allows us to take larger steps while maintaining consistency
         
         # RectifiedFlow step: x_{t+1} = x_t + v_θ(x_t, t) * (σ_next - σ)
-        # This is the core flow matching equation with LTX rectified dynamics
+        # This is the core flow matching equation with rectified flow dynamics
         sigma_diff = (sigma_next - sigma)
         while len(sigma_diff.shape) < len(sample.shape):
             sigma_diff = sigma_diff.unsqueeze(-1)

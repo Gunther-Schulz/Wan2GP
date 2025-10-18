@@ -433,7 +433,7 @@ class WanAny2V:
                 device=self.device,
                 sigmas=sampling_sigmas)
         elif sample_solver == 'lcm':
-            # LCM + LTX scheduler: Latent Consistency Model with RectifiedFlow
+            # LCM scheduler: Latent Consistency Model with RectifiedFlow
             # Optimized for Lightning LoRAs with ultra-fast 2-8 step inference
             effective_steps = min(sampling_steps, 8)  # LCM works best with few steps
             sample_scheduler = LCMScheduler(

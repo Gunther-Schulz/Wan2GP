@@ -451,7 +451,7 @@ class WanAny2V:
                 num_train_timesteps=self.num_train_timesteps,
                 shift=1,
                 use_dynamic_shifting=False)
-            sampling_sigmas = bong_tangent_scheduler(sampling_steps)
+            sampling_sigmas = bong_tangent_scheduler(sampling_steps, shift=shift)
             timesteps, _ = retrieve_timesteps(
                 sample_scheduler,
                 device=self.device,

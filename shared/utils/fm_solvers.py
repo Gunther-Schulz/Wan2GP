@@ -855,3 +855,73 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
 
     def __len__(self):
         return self.config.num_train_timesteps
+
+
+def get_bong_tangent_sigmas(steps, slope, pivot, start, end):
+    """
+    Helper function to generate arctangent-based sigma values.
+    Used by bong_tangent_scheduler to create non-linear schedules.
+    """
+    smax = ((2 / math.pi) * math.atan(-slope * (0 - pivot)) + 1) / 2
+    smin = ((2 / math.pi) * math.atan(-slope * ((steps - 1) - pivot)) + 1) / 2
+
+    srange = smax - smin
+    sscale = start - end
+
+    sigmas = [((((2 / math.pi) * math.atan(-slope * (x - pivot)) + 1) / 2) - smin) * (1 / srange) * sscale + end for x in range(steps)]
+
+    return sigmas
+
+
+def bong_tangent_scheduler(n, shift=3.0, *, start=1.0, middle=0.5, end=0.03333, pivot_1=0.6, pivot_2=0.6, slope_1=0.2, slope_2=0.2):
+    """
+    Bongo Tangent scheduler adapted from forge-classic for flow matching
+    https://github.com/ClownsharkBatwing/RES4LYF/blob/main/sigmas.py#L4076
+    
+    Generates a non-linear sigma schedule using arctangent curves, then applies
+    the flow matching shift transformation.
+    
+    IMPORTANT: For flow matching, sigmas should NOT include final 0.0
+    They should go from 1.0 down to a small positive value (like 0.033)
+    
+    Args:
+        n: Number of sampling steps
+        shift: Flow matching shift parameter (default 3.0)
+        start: Starting sigma value (default 1.0)
+        middle: Midpoint sigma value (default 0.5)
+        end: Ending sigma value (default 0.03333, NOT 0.0 for flow matching)
+        pivot_1: First stage pivot point as fraction of steps (default 0.6)
+        pivot_2: Second stage pivot point as fraction of steps (default 0.6)
+        slope_1: First stage curve steepness (default 0.2)
+        slope_2: Second stage curve steepness (default 0.2)
+    
+    Returns:
+        numpy.ndarray: Array of n sigma values with flow matching shift applied
+    """
+    # Create n+1 internal steps to match the curve, but we'll return only n
+    n_internal = n + 2
+
+    midpoint = int((n_internal * pivot_1 + n_internal * pivot_2) / 2)
+    pivot_1_internal = int(n_internal * pivot_1)
+    pivot_2_internal = int(n_internal * pivot_2)
+
+    slope_1 = slope_1 / (n_internal / 40)
+    slope_2 = slope_2 / (n_internal / 40)
+
+    stage_2_len = n_internal - midpoint
+    stage_1_len = n_internal - stage_2_len
+
+    tan_sigmas_1 = get_bong_tangent_sigmas(stage_1_len, slope_1, pivot_1_internal, start, middle)
+    tan_sigmas_2 = get_bong_tangent_sigmas(stage_2_len, slope_2, pivot_2_internal - stage_1_len, middle, end)
+
+    # Combine stages: remove overlap and don't include final zero
+    tan_sigmas_1 = tan_sigmas_1[:-1]
+    tan_sigmas = np.array(tan_sigmas_1 + tan_sigmas_2)
+    
+    # Take only first n values (exclude any trailing values including 0.0)
+    tan_sigmas = tan_sigmas[:n]
+    
+    # Apply flow matching shift transformation (critical for flow matching models!)
+    tan_sigmas = shift * tan_sigmas / (1 + (shift - 1) * tan_sigmas)
+
+    return tan_sigmas

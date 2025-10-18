@@ -27,7 +27,8 @@ from .modules.vae2_2 import Wan2_2_VAE
 
 from .modules.clip import CLIPModel
 from shared.utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
-                               get_sampling_sigmas, retrieve_timesteps)
+                               get_sampling_sigmas, retrieve_timesteps, bong_tangent_scheduler)
+from shared.utils.res_samplers import get_res_2s_sigmas, get_res_3s_sigmas
 from shared.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .modules.posemb_layers import get_rotary_pos_embed, get_nd_rotary_pos_embed
 from shared.utils.vace_preprocessor import VaceVideoProcessor
@@ -424,6 +425,38 @@ class WanAny2V:
             )
             sample_scheduler.set_timesteps(effective_steps, device=self.device, shift=shift)
             timesteps = sample_scheduler.timesteps
+        elif sample_solver == 'bong_tangent':
+            sample_scheduler = FlowDPMSolverMultistepScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                shift=1,
+                use_dynamic_shifting=False)
+            sampling_sigmas = bong_tangent_scheduler(sampling_steps, shift=shift)
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler,
+                device=self.device,
+                sigmas=sampling_sigmas)
+        elif sample_solver == 'res_2s':
+            # RES_2S: 2-stage exponential integrator (2x model evaluations)
+            sample_scheduler = FlowDPMSolverMultistepScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                shift=1,
+                use_dynamic_shifting=False)
+            sampling_sigmas = get_res_2s_sigmas(sampling_steps, shift=shift)
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler,
+                device=self.device,
+                sigmas=sampling_sigmas)
+        elif sample_solver == 'res_3s':
+            # RES_3S: 3-stage exponential integrator (3x model evaluations)
+            sample_scheduler = FlowDPMSolverMultistepScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                shift=1,
+                use_dynamic_shifting=False)
+            sampling_sigmas = get_res_3s_sigmas(sampling_steps, shift=shift)
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler,
+                device=self.device,
+                sigmas=sampling_sigmas)
         else:
             raise NotImplementedError(f"Unsupported Scheduler {sample_solver}")
         original_timesteps = timesteps

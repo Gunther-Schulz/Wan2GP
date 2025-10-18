@@ -1097,7 +1097,12 @@ class WanAny2V:
                 # TRUE RES: Use exponential integrator with custom stepping
                 # Initialize RES adapter on first step with CFG support
                 if i == 0:
-                    res_adapter = create_res_adapter(trans, rk_type=sample_solver, guide_scale=guide_scale)
+                    res_adapter = create_res_adapter(
+                        trans, 
+                        rk_type=sample_solver, 
+                        guide_scale=guide_scale,
+                        joint_pass=joint_pass and any_guidance
+                    )
                 
                 # Get next timestep (or 0 for last step)
                 t_next = timesteps[i + 1] if i < len(timesteps) - 1 else torch.tensor([0.0], device=self.device)

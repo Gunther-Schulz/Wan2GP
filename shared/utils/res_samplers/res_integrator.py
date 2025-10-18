@@ -80,11 +80,34 @@ class RESExponentialIntegrator:
         Returns:
             Next latent state x_next
         """
-        # Step size (negative because we're going from high to low sigma)
-        h = sigma_next - sigma
+        # Safety check: exponential methods can't handle sigma_next = 0
+        if sigma_next == 0.0:
+            raise ValueError(
+                "RES exponential integrator cannot handle sigma_next=0 "
+                "(would result in h = -log(0) = infinity). "
+                "Use Euler or another method for the final step to sigma=0."
+            )
+        
+        # Step size for RK integration in LOG SPACE (exponential methods)
+        # RES uses: h = -log(sigma_next/sigma) 
+        # This is POSITIVE when sigma decreases (log gets more negative)
+        h = -torch.log(torch.tensor(sigma_next / sigma)).item()
         
         # Calculate coefficients for this step size
         self.calculate_coefficients(float(h))
+        
+        # Debug: Print coefficients on first call
+        if not hasattr(self, '_coeff_printed'):
+            print(f"   ⚙️  RES-{self.num_stages}S (EXPONENTIAL) Coefficients:")
+            print(f"      h = -log(σ_next/σ) = {float(h):.4f} (positive in log space)")
+            print(f"      Stage nodes c: {self.c}")
+            print(f"      Output weights b: {self.b}")
+            print(f"      Stage matrix a:")
+            for row_idx, row in enumerate(self.a):
+                print(f"         a[{row_idx}]: {row}")
+            print(f"      Formula: x_next = x + h * sum(b[i] * k[i]) where k = velocity")
+            print(f"      Exponential σ_intermediate = σ * exp(-h * c[i])")
+            self._coeff_printed = True
         
         # Convert coefficients to tensors
         device = x.device
@@ -98,15 +121,24 @@ class RESExponentialIntegrator:
         
         # Stage 1 (always at current point)
         with torch.no_grad():
-            # Get model prediction at current state
-            denoised = model_fn(x, sigma, **model_kwargs)
-            # Calculate epsilon (velocity field in flow matching)
-            eps_1 = (x - denoised) / sigma
-            k.append(eps_1)
+            # Get velocity from model (model now returns velocity directly)
+            velocity = model_fn(x, sigma, **model_kwargs)
+            k.append(velocity)
+            
+            # Debug first stage
+            if not hasattr(self, '_stage_debug_count'):
+                self._stage_debug_count = 0
+            if self._stage_debug_count < 1:
+                self._stage_debug_count += 1
+                print(f"   🔬 Stage 1 (at σ={sigma:.4f}):")
+                print(f"      Input x: [{x.min():.3f}, {x.max():.3f}] mean={x.mean():.3f}")
+                print(f"      Velocity: [{velocity.min():.3f}, {velocity.max():.3f}] mean={velocity.mean():.3f}")
+                print(f"      k[0] = velocity")
         
         # Stage 2 (and 3 for res_3s)
         for i in range(1, self.num_stages):
             # Calculate intermediate state using previous stages
+            # RK formula: x_intermediate = x + h * sum(a[i,j] * k[j])
             x_intermediate = x.clone()
             
             # Add contribution from all previous stages
@@ -114,22 +146,48 @@ class RESExponentialIntegrator:
                 # a[i,j] is the coefficient for stage j in computing stage i
                 a_ij = a[i, j]
                 if abs(a_ij) > 1e-10:  # Skip if coefficient is essentially zero
-                    x_intermediate = x_intermediate + a_ij * k[j]
+                    x_intermediate = x_intermediate + h * a_ij * k[j]  # RK: x + h * a * velocity
             
-            # Intermediate sigma value
-            sigma_intermediate = sigma + c[i] * h
+            # Intermediate sigma value for EXPONENTIAL methods (RES uses log space)
+            # Formula: sigma_intermediate = sigma * exp(-h * c[i])
+            # Where h = -log(sigma_next/sigma) is positive in log space
+            sigma_intermediate = sigma * torch.exp(-h * c[i])
             
             with torch.no_grad():
-                # Get model prediction at intermediate state
-                denoised = model_fn(x_intermediate, sigma_intermediate, **model_kwargs)
-                # Calculate epsilon
-                eps_i = (x_intermediate - denoised) / sigma_intermediate
-                k.append(eps_i)
+                # Get velocity at intermediate state
+                velocity_i = model_fn(x_intermediate, sigma_intermediate, **model_kwargs)
+                k.append(velocity_i)
+                
+                # Debug intermediate stages
+                if hasattr(self, '_stage_debug_count') and self._stage_debug_count == 1:
+                    print(f"   🔬 Stage {i+1} (at σ={sigma_intermediate:.4f}):")
+                    print(f"      x_intermediate: [{x_intermediate.min():.3f}, {x_intermediate.max():.3f}] mean={x_intermediate.mean():.3f}")
+                    print(f"      Velocity: [{velocity_i.min():.3f}, {velocity_i.max():.3f}] mean={velocity_i.mean():.3f}")
+                    print(f"      k[{i}] = velocity")
         
         # Final update: combine all stages using output weights b
+        # Exponential RK formula: x_next = x + h * sum(b[i] * k[i])
+        # Where h > 0 (positive in log space), k[i] = velocity = -σ*noise_pred (negative, toward clean)
+        # Result: x + (positive h) * (negative velocity) = x - something = denoising!
         x_next = x.clone()
+        
+        # Debug combination in detail
+        if hasattr(self, '_stage_debug_count') and self._stage_debug_count == 1:
+            print(f"   🎯 Final Combination (Exponential RK):")
+            print(f"      x_next = x + h * sum(b[i] * k[i]) where h={h:.4f} > 0")
+            print(f"      Starting x: mean={x.mean():.3f}")
+            
         for i in range(self.num_stages):
-            x_next = x_next + b[i] * k[i]
+            contribution = h * b[i] * k[i]  # Multiply by step size h
+            x_next = x_next + contribution
+            
+            if hasattr(self, '_stage_debug_count') and self._stage_debug_count == 1:
+                print(f"      + h*b[{i}]={h:.4f}*{b[i]:.6f} * k[{i}] (mean={k[i].mean():.3f}) = {contribution.mean():.3f}")
+        
+        # Debug final result
+        if hasattr(self, '_stage_debug_count') and self._stage_debug_count == 1:
+            print(f"      Final x_next: [{x_next.min():.3f}, {x_next.max():.3f}] mean={x_next.mean():.3f}")
+            self._stage_debug_count = 2  # Only show detailed debug for first step
         
         return x_next
 

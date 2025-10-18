@@ -29,6 +29,7 @@ from .modules.clip import CLIPModel
 from shared.utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps, bong_tangent_scheduler)
 from shared.utils.res_samplers import get_res_2s_sigmas, get_res_3s_sigmas
+from shared.utils.res_samplers.res_wan_adapter import create_res_adapter
 from shared.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .modules.posemb_layers import get_rotary_pos_embed, get_nd_rotary_pos_embed
 from shared.utils.vace_preprocessor import VaceVideoProcessor
@@ -436,27 +437,19 @@ class WanAny2V:
                 device=self.device,
                 sigmas=sampling_sigmas)
         elif sample_solver == 'res_2s':
-            # RES_2S: 2-stage exponential integrator (2x model evaluations)
-            sample_scheduler = FlowDPMSolverMultistepScheduler(
-                num_train_timesteps=self.num_train_timesteps,
-                shift=1,
-                use_dynamic_shifting=False)
+            # TRUE RES_2S: 2-stage exponential integrator with φ-functions
+            # Creates RES adapter that handles custom RK stepping
+            sample_scheduler = None  # RES uses custom stepping, not scheduler
             sampling_sigmas = get_res_2s_sigmas(sampling_steps, shift=shift)
-            timesteps, _ = retrieve_timesteps(
-                sample_scheduler,
-                device=self.device,
-                sigmas=sampling_sigmas)
+            # Convert sigmas to timesteps (multiply by 1000)
+            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device)
         elif sample_solver == 'res_3s':
-            # RES_3S: 3-stage exponential integrator (3x model evaluations)
-            sample_scheduler = FlowDPMSolverMultistepScheduler(
-                num_train_timesteps=self.num_train_timesteps,
-                shift=1,
-                use_dynamic_shifting=False)
+            # TRUE RES_3S: 3-stage exponential integrator with φ-functions
+            # Creates RES adapter that handles custom RK stepping  
+            sample_scheduler = None  # RES uses custom stepping, not scheduler
             sampling_sigmas = get_res_3s_sigmas(sampling_steps, shift=shift)
-            timesteps, _ = retrieve_timesteps(
-                sample_scheduler,
-                device=self.device,
-                sigmas=sampling_sigmas)
+            # Convert sigmas to timesteps (multiply by 1000)
+            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device)
         else:
             raise NotImplementedError(f"Unsupported Scheduler {sample_solver}")
         original_timesteps = timesteps
@@ -1080,6 +1073,24 @@ class WanAny2V:
                 dt = timesteps[i] if i == len(timesteps)-1 else (timesteps[i] - timesteps[i + 1])
                 dt = dt.item() / self.num_timesteps
                 latents = latents - noise_pred * dt
+            elif sample_solver in ['res_2s', 'res_3s']:
+                # TRUE RES: Use exponential integrator with custom stepping
+                # Initialize RES adapter on first step
+                if i == 0:
+                    res_adapter = create_res_adapter(trans, rk_type=sample_solver)
+                
+                # Get next timestep (or 0 for last step)
+                t_next = timesteps[i + 1] if i < len(timesteps) - 1 else torch.tensor([0.0], device=self.device)
+                
+                # RES handles model calling internally (for RK stages)
+                # We pass gen_args and kwargs so it can call the model
+                latents = res_adapter.step(
+                    latents=latents,
+                    current_timestep=t,
+                    next_timestep=t_next,
+                    gen_args=gen_args,
+                    kwargs=kwargs
+                )
             else:
                 latents = sample_scheduler.step(
                     noise_pred[:, :, :target_shape[1]],

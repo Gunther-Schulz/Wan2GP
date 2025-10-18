@@ -442,6 +442,18 @@ class WanAny2V:
             sample_scheduler.timesteps = timesteps
             sample_scheduler.sigmas = torch.cat([torch.tensor(sampling_sigmas, device=self.device, dtype=torch.float32), 
                                                    torch.tensor([0.], device=self.device, dtype=torch.float32)])
+        elif sample_solver == 'bong_dpm':
+            # Bongo Tangent with DPM++ stepping
+            # Uses arctangent-based sigma schedule with DPM++ solver
+            sample_scheduler = FlowDPMSolverMultistepScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                shift=1,
+                use_dynamic_shifting=False)
+            sampling_sigmas = bong_tangent_scheduler(sampling_steps, shift=shift)
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler,
+                device=self.device,
+                sigmas=sampling_sigmas)
         elif sample_solver == 'res_2s':
             # TRUE RES_2S: 2-stage exponential integrator with φ-functions
             # Creates RES adapter that handles custom RK stepping

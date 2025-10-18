@@ -19,7 +19,7 @@ class RESWanAdapter:
     compatible with Wan's sampling architecture.
     """
     
-    def __init__(self, model, rk_type: str = 'res_2s', guide_scale: float = 1.0, joint_pass: bool = False):
+    def __init__(self, model, rk_type: str = 'res_2s', guide_scale: float = 1.0, joint_pass: bool = False, noise_anchor: float = 1.0):
         """
         Initialize RES adapter.
         
@@ -28,11 +28,13 @@ class RESWanAdapter:
             rk_type: Either 'res_2s' or 'res_3s'
             guide_scale: CFG guidance scale
             joint_pass: Whether model uses joint pass for CFG
+            noise_anchor: Anchoring strength for epsilon blend (0.0 = unmoored, 1.0 = fully anchored/default)
         """
         self.model = model
         self.rk_type = rk_type
         self.guide_scale = guide_scale
         self.joint_pass = joint_pass
+        self.noise_anchor = noise_anchor
         
         # Create appropriate RES sampler
         if rk_type == 'res_2s':
@@ -44,22 +46,30 @@ class RESWanAdapter:
         else:
             raise ValueError(f"Unknown rk_type: {rk_type}")
     
-    def model_fn(self, x: torch.Tensor, sigma: float, gen_args: Dict[str, Any], kwargs: Dict[str, Any]) -> torch.Tensor:
+    def model_fn(self, x: torch.Tensor, sigma: float, gen_args: Dict[str, Any], kwargs: Dict[str, Any], 
+                 x_0: torch.Tensor = None, main_sigma: float = None) -> torch.Tensor:
         """
         Model function wrapper that RES integrator can call.
         
         This adapts Wan's model calling convention for the RES integrator.
-        The RES integrator needs a function that takes (x, sigma) and returns the VELOCITY (noise_pred).
+        Implements RES4LYF's anchoring strategy for better accuracy.
         
         Args:
-            x: Current latent state
-            sigma: Current noise level (0-1 range for flow matching)
+            x: Current latent state (intermediate for RK stages)
+            sigma: Current noise level at this stage (sub_sigma)
             gen_args: Conditioning arguments (context, etc.)
             kwargs: Additional model kwargs
+            x_0: Anchor point (start of step), defaults to x if None
+            main_sigma: Main sigma at step start, defaults to sigma if None
             
         Returns:
-            Velocity prediction (noise_pred) - NOT denoised!
+            Exponential velocity: epsilon = denoised - x_0 (with anchoring)
         """
+        # Set defaults for anchoring
+        if x_0 is None:
+            x_0 = x
+        if main_sigma is None:
+            main_sigma = sigma
         # Convert sigma (0-1) to timestep (0-1000)
         timestep_value = sigma * 1000.0
         timestep = torch.tensor([timestep_value], device=x.device, dtype=torch.float32)
@@ -138,33 +148,45 @@ class RESWanAdapter:
         else:
             noise_pred = ret_values
         
-        # Convert to exponential parametrization velocity
-        # RES4LYF exponential expects: velocity = denoised - x (points toward clean)
-        # From flow matching: denoised = x - sigma * noise_pred
-        # Therefore: velocity = (x - sigma * noise_pred) - x = -sigma * noise_pred
-        # 
-        # Actually checking RES4LYF line 959: epsilon = denoised - x_0
-        # So velocity should be: denoised - x, which equals -sigma * noise_pred
-        # But wait - let me recalculate:
-        #   denoised = x - sigma * noise_pred
-        #   velocity = denoised - x = (x - sigma * noise_pred) - x = -sigma * noise_pred ✓
-        velocity_exponential = -sigma * noise_pred
-        
-        # Compute denoised for debugging
+        # RES4LYF's anchoring strategy for exponential methods
+        # Step 1: Get initial denoised from model's noise_pred
         denoised = x - sigma * noise_pred
+        
+        # Step 2: Calculate epsilon relative to two anchor points
+        # eps_anchored: Relative to step start (x_0) with main sigma
+        # eps_unmoored: Relative to current state (x) with current sigma
+        eps_anchored = (x_0 - denoised) / main_sigma
+        eps_unmoored = (x - denoised) / sigma
+        
+        # Step 3: Blend epsilon based on noise_anchor parameter
+        # noise_anchor=0.0 → fully unmoored (standard behavior)
+        # noise_anchor=1.0 → fully anchored (more stable for large steps)
+        eps = eps_unmoored + self.noise_anchor * (eps_anchored - eps_unmoored)
+        
+        # Step 4: Recalculate denoised using blended epsilon
+        denoised = x_0 - main_sigma * eps
+        
+        # Step 5: Calculate exponential velocity
+        # For exponential methods: epsilon = denoised - x_0
+        velocity_exponential = denoised - x_0
         
         # Debug: Always print model call info
         if not hasattr(self, '_model_call_count'):
             self._model_call_count = 0
         self._model_call_count += 1
         
-        print(f"      🤖 Model call #{self._model_call_count}: σ={sigma:.4f}")
+        print(f"      🤖 Model call #{self._model_call_count}: σ={sigma:.4f} (main_σ={main_sigma:.4f})")
         print(f"         Input x: [{x.min():.3f}, {x.max():.3f}] mean={x.mean():.3f}")
-        print(f"         noise_pred: [{noise_pred.min():.3f}, {noise_pred.max():.3f}] mean={noise_pred.mean():.3f}")
-        print(f"         denoised = x - σ*noise_pred: [{denoised.min():.3f}, {denoised.max():.3f}] mean={denoised.mean():.3f}")
-        print(f"         velocity = denoised - x: [{velocity_exponential.min():.3f}, {velocity_exponential.max():.3f}] mean={velocity_exponential.mean():.3f}")
-        print(f"         (Velocity should be NEGATIVE to denoise)")
-        print(f"         (RK: x_next = x + h * velocity where h > 0 in log space)")
+        if self.noise_anchor > 0:
+            print(f"         Anchoring: {self.noise_anchor:.2f} (0=unmoored, 1=fully anchored to x_0)")
+            print(f"         eps_unmoored mean={eps_unmoored.mean():.6f}, eps_anchored mean={eps_anchored.mean():.6f}")
+            print(f"         blended eps mean={eps.mean():.6f}")
+        print(f"         Final denoised: [{denoised.min():.3f}, {denoised.max():.3f}] mean={denoised.mean():.3f}")
+        print(f"         Exponential velocity = denoised - x_0: mean={velocity_exponential.mean():.6f}")
+        if velocity_exponential.mean() < 0:
+            print(f"         ✅ Velocity is NEGATIVE (denoising)")
+        else:
+            print(f"         ⚠️  Velocity is POSITIVE (check sign!)")
         
         return velocity_exponential
     
@@ -308,7 +330,8 @@ class RESWanAdapter:
         return latents_next
 
 
-def create_res_adapter(model, rk_type: str, guide_scale: float = 1.0, joint_pass: bool = False) -> RESWanAdapter:
+def create_res_adapter(model, rk_type: str, guide_scale: float = 1.0, joint_pass: bool = False, 
+                       noise_anchor: float = 1.0) -> RESWanAdapter:
     """
     Factory function to create RES adapter.
     
@@ -317,9 +340,10 @@ def create_res_adapter(model, rk_type: str, guide_scale: float = 1.0, joint_pass
         rk_type: Either 'res_2s' or 'res_3s'
         guide_scale: CFG guidance scale
         joint_pass: Whether model uses joint pass for CFG
+        noise_anchor: Anchoring strength (0.0=unmoored, 1.0=fully anchored/default)
         
     Returns:
         RESWanAdapter instance
     """
-    return RESWanAdapter(model, rk_type, guide_scale, joint_pass)
+    return RESWanAdapter(model, rk_type, guide_scale, joint_pass, noise_anchor)
 

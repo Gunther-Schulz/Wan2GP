@@ -80,6 +80,10 @@ class RESExponentialIntegrator:
         Returns:
             Next latent state x_next
         """
+        # Store x_0 as anchor point for this step (RES4LYF anchoring)
+        x_0 = x.clone()
+        main_sigma = sigma
+        
         # Safety check: exponential methods can't handle sigma_next = 0
         if sigma_next == 0.0:
             raise ValueError(
@@ -121,8 +125,9 @@ class RESExponentialIntegrator:
         
         # Stage 1 (always at current point)
         with torch.no_grad():
-            # Get velocity from model (model now returns velocity directly)
-            velocity = model_fn(x, sigma, **model_kwargs)
+            # Get velocity from model with anchoring
+            # Pass x_0 and main_sigma for RES4LYF-style anchoring
+            velocity = model_fn(x, sigma, x_0=x_0, main_sigma=main_sigma, **model_kwargs)
             k.append(velocity)
             
             # Debug first stage
@@ -154,8 +159,8 @@ class RESExponentialIntegrator:
             sigma_intermediate = sigma * torch.exp(-h * c[i])
             
             with torch.no_grad():
-                # Get velocity at intermediate state
-                velocity_i = model_fn(x_intermediate, sigma_intermediate, **model_kwargs)
+                # Get velocity at intermediate state with anchoring
+                velocity_i = model_fn(x_intermediate, sigma_intermediate, x_0=x_0, main_sigma=main_sigma, **model_kwargs)
                 k.append(velocity_i)
                 
                 # Debug intermediate stages

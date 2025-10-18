@@ -427,15 +427,20 @@ class WanAny2V:
             sample_scheduler.set_timesteps(effective_steps, device=self.device, shift=shift)
             timesteps = sample_scheduler.timesteps
         elif sample_solver == 'bong_tangent':
-            sample_scheduler = FlowDPMSolverMultistepScheduler(
+            # Bongo Tangent with TRUE LCM stepping
+            # Uses arctangent-based sigma schedule with LCM consistency model stepping
+            sample_scheduler = LCMScheduler(
                 num_train_timesteps=self.num_train_timesteps,
-                shift=1,
-                use_dynamic_shifting=False)
+                num_inference_steps=sampling_steps,
+                shift=shift
+            )
+            # Generate custom bongo tangent sigma schedule
             sampling_sigmas = bong_tangent_scheduler(sampling_steps, shift=shift)
-            timesteps, _ = retrieve_timesteps(
-                sample_scheduler,
-                device=self.device,
-                sigmas=sampling_sigmas)
+            # Convert to timesteps and set them on LCM scheduler
+            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device)
+            sample_scheduler.timesteps = timesteps
+            sample_scheduler.sigmas = torch.cat([torch.tensor(sampling_sigmas, device=self.device), 
+                                                   torch.tensor([0.], device=self.device)])
         elif sample_solver == 'res_2s':
             # TRUE RES_2S: 2-stage exponential integrator with φ-functions
             # Creates RES adapter that handles custom RK stepping

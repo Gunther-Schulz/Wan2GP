@@ -437,24 +437,27 @@ class WanAny2V:
             # Generate custom bongo tangent sigma schedule
             sampling_sigmas = bong_tangent_scheduler(sampling_steps, shift=shift)
             # Convert to timesteps and set them on LCM scheduler
-            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device)
+            # CRITICAL: Use float32 dtype to match model weights
+            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device, dtype=torch.float32)
             sample_scheduler.timesteps = timesteps
-            sample_scheduler.sigmas = torch.cat([torch.tensor(sampling_sigmas, device=self.device), 
-                                                   torch.tensor([0.], device=self.device)])
+            sample_scheduler.sigmas = torch.cat([torch.tensor(sampling_sigmas, device=self.device, dtype=torch.float32), 
+                                                   torch.tensor([0.], device=self.device, dtype=torch.float32)])
         elif sample_solver == 'res_2s':
             # TRUE RES_2S: 2-stage exponential integrator with φ-functions
             # Creates RES adapter that handles custom RK stepping
             sample_scheduler = None  # RES uses custom stepping, not scheduler
             sampling_sigmas = get_res_2s_sigmas(sampling_steps, shift=shift)
             # Convert sigmas to timesteps (multiply by 1000)
-            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device)
+            # Use float32 dtype to match model weights
+            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device, dtype=torch.float32)
         elif sample_solver == 'res_3s':
             # TRUE RES_3S: 3-stage exponential integrator with φ-functions
             # Creates RES adapter that handles custom RK stepping  
             sample_scheduler = None  # RES uses custom stepping, not scheduler
             sampling_sigmas = get_res_3s_sigmas(sampling_steps, shift=shift)
             # Convert sigmas to timesteps (multiply by 1000)
-            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device)
+            # Use float32 dtype to match model weights
+            timesteps = torch.tensor([s * 1000 for s in sampling_sigmas], device=self.device, dtype=torch.float32)
         else:
             raise NotImplementedError(f"Unsupported Scheduler {sample_solver}")
         original_timesteps = timesteps

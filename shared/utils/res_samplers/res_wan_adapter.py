@@ -18,16 +18,18 @@ class RESWanAdapter:
     compatible with Wan's sampling architecture.
     """
     
-    def __init__(self, model, rk_type: str = 'res_2s'):
+    def __init__(self, model, rk_type: str = 'res_2s', guide_scale: float = 1.0):
         """
         Initialize RES adapter.
         
         Args:
             model: Wan transformer model
             rk_type: Either 'res_2s' or 'res_3s'
+            guide_scale: CFG guidance scale
         """
         self.model = model
         self.rk_type = rk_type
+        self.guide_scale = guide_scale
         
         # Create appropriate RES sampler
         if rk_type == 'res_2s':
@@ -76,7 +78,17 @@ class RESWanAdapter:
         # Call model to get noise prediction
         # Model returns noise, we need to convert to denoised
         with torch.no_grad():
-            noise_pred = self.model(**gen_args_copy, **kwargs_copy)
+            ret_values = self.model(**gen_args_copy, **kwargs_copy)
+        
+        # Apply CFG if guide_scale > 1
+        if self.guide_scale > 1.0 and isinstance(ret_values, (list, tuple)) and len(ret_values) >= 2:
+            # Standard CFG: noise = uncond + guide_scale * (cond - uncond)
+            noise_pred_cond, noise_pred_uncond = ret_values[0], ret_values[1]
+            noise_pred = noise_pred_uncond + self.guide_scale * (noise_pred_cond - noise_pred_uncond)
+        elif isinstance(ret_values, (list, tuple)):
+            noise_pred = ret_values[0]
+        else:
+            noise_pred = ret_values
         
         # Flow matching: x = signal + sigma * noise
         # So: signal = x - sigma * noise
@@ -122,16 +134,17 @@ class RESWanAdapter:
         return latents_next
 
 
-def create_res_adapter(model, rk_type: str) -> RESWanAdapter:
+def create_res_adapter(model, rk_type: str, guide_scale: float = 1.0) -> RESWanAdapter:
     """
     Factory function to create RES adapter.
     
     Args:
         model: Wan transformer model
         rk_type: Either 'res_2s' or 'res_3s'
+        guide_scale: CFG guidance scale
         
     Returns:
         RESWanAdapter instance
     """
-    return RESWanAdapter(model, rk_type)
+    return RESWanAdapter(model, rk_type, guide_scale)
 

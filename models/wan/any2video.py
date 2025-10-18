@@ -1083,14 +1083,15 @@ class WanAny2V:
                 latents = latents - noise_pred * dt
             elif sample_solver in ['res_2s', 'res_3s']:
                 # TRUE RES: Use exponential integrator with custom stepping
-                # Initialize RES adapter on first step
+                # Initialize RES adapter on first step with CFG support
                 if i == 0:
-                    res_adapter = create_res_adapter(trans, rk_type=sample_solver)
+                    res_adapter = create_res_adapter(trans, rk_type=sample_solver, guide_scale=guide_scale)
                 
                 # Get next timestep (or 0 for last step)
                 t_next = timesteps[i + 1] if i < len(timesteps) - 1 else torch.tensor([0.0], device=self.device)
                 
                 # RES handles model calling internally (for RK stages)
+                # CFG is applied inside the adapter for each stage
                 # We pass gen_args and kwargs so it can call the model
                 latents = res_adapter.step(
                     latents=latents,

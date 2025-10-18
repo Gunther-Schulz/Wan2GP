@@ -424,8 +424,8 @@ class WanAny2V:
             )
             sample_scheduler.set_timesteps(effective_steps, device=self.device, shift=shift)
             timesteps = sample_scheduler.timesteps
-        elif sample_solver == 'bong_tangent':
-            # Bongo Tangent with TRUE LCM stepping
+        elif sample_solver == 'bong_tangent_lcm':
+            # Bongo Tangent with LCM stepping
             # Uses arctangent-based sigma schedule with LCM consistency model stepping
             sample_scheduler = LCMScheduler(
                 num_train_timesteps=self.num_train_timesteps,
@@ -440,7 +440,7 @@ class WanAny2V:
             sample_scheduler.timesteps = timesteps
             sample_scheduler.sigmas = torch.cat([torch.tensor(sampling_sigmas, device=self.device, dtype=torch.float32), 
                                                    torch.tensor([0.], device=self.device, dtype=torch.float32)])
-        elif sample_solver == 'bong_dpm':
+        elif sample_solver == 'bong_tangent_dpm':
             # Bongo Tangent with DPM++ stepping
             # Uses arctangent-based sigma schedule with DPM++ solver
             sample_scheduler = FlowDPMSolverMultistepScheduler(

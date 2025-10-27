@@ -413,6 +413,35 @@ class WanAny2V:
                 sample_scheduler,
                 device=self.device,
                 sigmas=sampling_sigmas)
+        elif sample_solver == 'dpm_sde':
+            # DPM++ SDE: Stochastic Differential Equation variant
+            # Adds noise at each step for more natural/diverse results
+            sample_scheduler = FlowDPMSolverMultistepScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                shift=1,
+                use_dynamic_shifting=False,
+                algorithm_type="sde-dpmsolver++",  # Enable SDE mode
+                solver_order=1)  # First-order SDE solver
+            sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler,
+                device=self.device,
+                sigmas=sampling_sigmas)
+        elif sample_solver == 'dpm_2m_sde':
+            # DPM++ 2M SDE: Second-order multistep SDE variant
+            # Better quality than first-order, still stochastic
+            sample_scheduler = FlowDPMSolverMultistepScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                shift=1,
+                use_dynamic_shifting=False,
+                algorithm_type="sde-dpmsolver++",  # Enable SDE mode
+                solver_order=2,  # Second-order multistep solver
+                solver_type="midpoint")  # Midpoint solver for stability
+            sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
+            timesteps, _ = retrieve_timesteps(
+                sample_scheduler,
+                device=self.device,
+                sigmas=sampling_sigmas)
         elif sample_solver == 'lcm':
             # LCM scheduler: Latent Consistency Model with RectifiedFlow
             # Optimized for Lightning LoRAs with ultra-fast 2-8 step inference

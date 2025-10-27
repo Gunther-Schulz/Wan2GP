@@ -33,6 +33,7 @@ from .modules.posemb_layers import get_rotary_pos_embed, get_nd_rotary_pos_embed
 from shared.utils.vace_preprocessor import VaceVideoProcessor
 from shared.utils.basic_flowmatch import FlowMatchScheduler
 from shared.utils.lcm_scheduler import LCMScheduler
+from shared.utils.brownian_noise import BrownianTreeNoiseSampler
 from shared.utils.utils import get_outpainting_frame_location, resize_lanczos, calculate_new_dimensions, convert_image_to_tensor, fit_image_into_canvas
 from .multitalk.multitalk_utils import MomentumBuffer, adaptive_projected_guidance, match_and_blend_colors, match_and_blend_colors_with_mask
 from shared.utils.audio_video import save_video
@@ -919,6 +920,20 @@ class WanAny2V:
         # b, c, lat_f, lat_h, lat_w
         latents = torch.randn(batch_size, *target_shape, dtype=torch.float32, device=self.device, generator=seed_g)
         if "G" in video_prompt_type: randn = latents
+        
+        # Create BrownianTree noise sampler for SDE schedulers (better temporal coherence)
+        brownian_noise_sampler = None
+        if sample_solver in ['dpm_sde', 'dpm_2m_sde']:
+            # BrownianTree provides temporally correlated noise for smoother, more natural results
+            sigma_min = (timesteps[-1] / self.num_train_timesteps).item() if len(timesteps) > 0 else 0.001
+            sigma_max = (timesteps[0] / self.num_train_timesteps).item() if len(timesteps) > 0 else 1.0
+            brownian_noise_sampler = BrownianTreeNoiseSampler(
+                latents, 
+                sigma_min=sigma_min, 
+                sigma_max=sigma_max, 
+                seed=seed
+            )
+        
         if apg_switch != 0:  
             apg_momentum = -0.75
             apg_norm_threshold = 55
@@ -1105,11 +1120,24 @@ class WanAny2V:
                 dt = dt.item() / self.num_timesteps
                 latents = latents - noise_pred * dt
             else:
+                # For SDE schedulers, inject BrownianTree noise for better temporal coherence
+                if brownian_noise_sampler is not None and i < len(timesteps) - 1:
+                    # Get current and next sigma values
+                    sigma_current = (timesteps[i] / self.num_train_timesteps).item()
+                    sigma_next = (timesteps[i + 1] / self.num_train_timesteps).item()
+                    # Sample temporally correlated noise
+                    variance_noise = brownian_noise_sampler(sigma_current, sigma_next)
+                    scheduler_kwargs['variance_noise'] = variance_noise
+                
                 latents = sample_scheduler.step(
                     noise_pred[:, :, :target_shape[1]],
                     t,
                     latents,
                     **scheduler_kwargs)[0]
+                
+                # Clean up variance_noise from kwargs for next iteration
+                if 'variance_noise' in scheduler_kwargs:
+                    del scheduler_kwargs['variance_noise']
 
 
             if image_mask_latents is not None:

@@ -434,28 +434,30 @@ class WanAny2V:
                 device=self.device,
                 sigmas=sampling_sigmas)
         elif sample_solver == 'dpm_sde':
-            # DPM++ SDE: Stochastic Differential Equation variant
-            # Adds noise at each step for more natural/diverse results
+            # DPM++ SDE (Diffusers-style): First-order SDE solver
+            # Note: Uses 1 model call per step. Different from k_diffusion's DPM++ SDE
+            # which uses 2 calls per step. For better quality, use dpm_2m_sde instead.
             sample_scheduler = FlowDPMSolverMultistepScheduler(
                 num_train_timesteps=self.num_train_timesteps,
                 shift=1,
                 use_dynamic_shifting=False,
                 algorithm_type="sde-dpmsolver++",  # Enable SDE mode
-                solver_order=1)  # First-order SDE solver
+                solver_order=1)  # First-order: no multistep correction
             sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
             timesteps, _ = retrieve_timesteps(
                 sample_scheduler,
                 device=self.device,
                 sigmas=sampling_sigmas)
         elif sample_solver == 'dpm_2m_sde':
-            # DPM++ 2M SDE: Second-order multistep SDE variant
-            # Better quality than first-order, still stochastic
+            # DPM++ 2M SDE (Diffusers-style): Second-order multistep SDE solver
+            # Uses 1 model call per step, same speed as dpm_sde but BETTER quality
+            # Uses previous step's output for second-order accuracy (multistep method)
             sample_scheduler = FlowDPMSolverMultistepScheduler(
                 num_train_timesteps=self.num_train_timesteps,
                 shift=1,
                 use_dynamic_shifting=False,
                 algorithm_type="sde-dpmsolver++",  # Enable SDE mode
-                solver_order=2,  # Second-order multistep solver
+                solver_order=2,  # Second-order: uses multistep correction
                 solver_type="midpoint")  # Midpoint solver for stability
             sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
             timesteps, _ = retrieve_timesteps(

@@ -176,7 +176,6 @@ class family_handler():
         "mag_cache" : True,
         "keep_frames_video_guide_not_supported": base_model_type in ["infinitetalk"],
         "sample_solvers":[
-                            ("heun (2x slower)", "heun"),
                             ("unipc", "unipc"),
                             ("dpm++ 2m sde", "dpm_2m_sde"),
                             ("dpm++ sde", "dpm_sde"),

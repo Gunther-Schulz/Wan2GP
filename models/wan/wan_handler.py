@@ -181,10 +181,10 @@ class family_handler():
                             ("dpm++ sde", "dpm_sde"),
                             ("dpm++", "dpm++"),
                             ("euler", "euler"),
-                            ("lcm (lightning loras)", "lcm"),
+                            ("lcm", "lcm"),
                             ("bongo tangent (lcm)", "bong_tangent_lcm"),
                             ("bongo tangent (dpm++)", "bong_tangent_dpm"),
-                            ("causvid", "causvid"), ]
+                            ("flowmatch causvid", "causvid"), ]
         })
 
 

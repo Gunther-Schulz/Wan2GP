@@ -179,6 +179,8 @@ class family_handler():
                             ("unipc", "unipc"),
                             ("euler", "euler"),
                             ("dpm++", "dpm++"),
+                            ("dpm++ sde (brownian)", "dpm_sde"),
+                            ("dpm++ 2m sde (brownian)", "dpm_2m_sde"),
                             ("flowmatch causvid", "causvid"),
                             ("lcm + ltx", "lcm"), ]
         })

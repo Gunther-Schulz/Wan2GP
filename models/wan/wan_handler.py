@@ -181,6 +181,8 @@ class family_handler():
                             ("dpm++", "dpm++"),
                             ("dpm++ sde (brownian)", "dpm_sde"),
                             ("dpm++ 2m sde (brownian)", "dpm_2m_sde"),
+                            ("bongo tangent (lcm)", "bong_tangent_lcm"),
+                            ("bongo tangent (dpm++)", "bong_tangent_dpm"),
                             ("flowmatch causvid", "causvid"),
                             ("lcm + ltx", "lcm"), ]
         })

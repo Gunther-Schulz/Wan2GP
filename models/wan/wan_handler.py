@@ -176,15 +176,16 @@ class family_handler():
         "mag_cache" : True,
         "keep_frames_video_guide_not_supported": base_model_type in ["infinitetalk"],
         "sample_solvers":[
+                            ("heun (2x slower)", "heun"),
                             ("unipc", "unipc"),
-                            ("euler", "euler"),
+                            ("dpm++ 2m sde", "dpm_2m_sde"),
+                            ("dpm++ sde", "dpm_sde"),
                             ("dpm++", "dpm++"),
-                            ("dpm++ sde (brownian)", "dpm_sde"),
-                            ("dpm++ 2m sde (brownian)", "dpm_2m_sde"),
+                            ("euler", "euler"),
+                            ("lcm (lightning loras)", "lcm"),
                             ("bongo tangent (lcm)", "bong_tangent_lcm"),
                             ("bongo tangent (dpm++)", "bong_tangent_dpm"),
-                            ("flowmatch causvid", "causvid"),
-                            ("lcm", "lcm"), ]
+                            ("causvid", "causvid"), ]
         })
 
 

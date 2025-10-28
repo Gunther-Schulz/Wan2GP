@@ -184,7 +184,7 @@ class family_handler():
                             ("bongo tangent (lcm)", "bong_tangent_lcm"),
                             ("bongo tangent (dpm++)", "bong_tangent_dpm"),
                             ("flowmatch causvid", "causvid"),
-                            ("lcm + ltx", "lcm"), ]
+                            ("lcm", "lcm"), ]
         })
 
 

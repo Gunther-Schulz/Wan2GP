@@ -49,7 +49,7 @@ pydantic==2.10.6
 torchdiffeq>=0.2.5
 torchsde>=0.2.6
 tensordict>=0.6.1
-mmgp==3.6.0
+mmgp==3.6.3
 peft==0.15.0
 matplotlib
 mpmath>=1.3.0

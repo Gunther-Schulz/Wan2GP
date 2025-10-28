@@ -29,7 +29,8 @@ from shared.utils.audio_video import extract_audio_tracks, combine_video_with_au
 from shared.utils.audio_video import save_image_metadata, read_image_metadata
 from shared.match_archi import match_nvidia_architecture
 from shared.attention import get_attention_modes, get_supported_attention_modes
-from huggingface_hub import hf_hub_download, snapshot_download    
+from huggingface_hub import hf_hub_download, snapshot_download
+from shared.utils import files_locator as fl 
 import torch
 import gc
 import traceback
@@ -53,6 +54,7 @@ from preprocessing.matanyone  import app as matanyone_app
 from tqdm import tqdm
 import requests
 from shared.gradio.gallery import AdvancedMediaGallery
+from collections import defaultdict
 
 # import torch._dynamo as dynamo
 # dynamo.config.recompile_limit = 2000   # default is 256
@@ -61,10 +63,9 @@ from shared.gradio.gallery import AdvancedMediaGallery
 global_queue_ref = []
 AUTOSAVE_FILENAME = "queue.zip"
 PROMPT_VARS_MAX = 10
-
-target_mmgp_version = "3.6.0"
-WanGP_version = "8.99"
-settings_version = 2.38
+target_mmgp_version = "3.6.3"
+WanGP_version = "8.996"
+settings_version = 2.39
 max_source_video_frames = 3000
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
 
@@ -147,6 +148,24 @@ def format_time(seconds):
         return f"{minutes}m {secs:02d}s"
     else:
         return f"{seconds:.1f}s"
+
+def format_generation_time(seconds):
+    """Format generation time showing raw seconds with human-readable time in parentheses when over 60s"""
+    raw_seconds = f"{int(seconds)}s"
+    
+    if seconds < 60:
+        return raw_seconds
+    
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    
+    if hours > 0:
+        human_readable = f"{hours}h {minutes}m {secs}s"
+    else:
+        human_readable = f"{minutes}m {secs}s"
+    
+    return f"{raw_seconds} ({human_readable})"
 
 def pil_to_base64_uri(pil_image, format="png", quality=75):
     if pil_image is None:
@@ -563,7 +582,7 @@ def process_prompt_and_add_tasks(state, model_choice):
 
     if test_any_sliding_window(model_type) and image_mode == 0:
         if video_length > sliding_window_size:
-            if model_type in ["t2v"] and not "G" in video_prompt_type :
+            if model_type in ["t2v", "t2v_2_2"] and not "G" in video_prompt_type :
                 gr.Info(f"You have requested to Generate Sliding Windows with a Text to Video model. Unless you use the Video to Video feature this is useless as a t2v model doesn't see past frames and it will generate the same video in each new window.") 
                 return ret()
             full_video_length = video_length if video_source is None else video_length +  sliding_window_overlap -1
@@ -1793,16 +1812,17 @@ if os.path.isfile("t2v_settings.json"):
 if not os.path.isfile(server_config_filename) and os.path.isfile("gradio_config.json"):
     shutil.move("gradio_config.json", server_config_filename) 
 
-if not os.path.isdir("ckpts/umt5-xxl/"):
-    os.makedirs("ckpts/umt5-xxl/")
-src_move = [ "ckpts/models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors", "ckpts/models_t5_umt5-xxl-enc-bf16.safetensors", "ckpts/models_t5_umt5-xxl-enc-quanto_int8.safetensors" ]
-tgt_move = [ "ckpts/xlm-roberta-large/", "ckpts/umt5-xxl/", "ckpts/umt5-xxl/"]
+src_move = [ "models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors", "models_t5_umt5-xxl-enc-bf16.safetensors", "models_t5_umt5-xxl-enc-quanto_int8.safetensors" ]
+tgt_move = [ "xlm-roberta-large", "umt5-xxl", "umt5-xxl"]
 for src,tgt in zip(src_move,tgt_move):
-    if os.path.isfile(src):
+    src = fl.locate_file(src)
+    tgt = fl.get_download_location(tgt)
+    if src is not None:
         try:
             if os.path.isfile(tgt):
                 shutil.remove(src)
             else:
+                os.makedirs(os.path.dirname(tgt))
                 shutil.move(src, tgt)
         except:
             pass
@@ -1823,7 +1843,9 @@ if not Path(server_config_filename).is_file():
         "vae_config": 0,
         "profile" : profile_type.LowRAM_LowVRAM,
         "preload_model_policy": [],
-        "UI_theme": "default"
+        "UI_theme": "default",
+        "checkpoints_paths": fl.default_checkpoints_paths,
+        "model_hierarchy_type": 1,
     }
 
     with open(server_config_filename, "w", encoding="utf-8") as writer:
@@ -1833,6 +1855,11 @@ else:
         text = reader.read()
     server_config = json.loads(text)
 
+checkpoints_paths = server_config.get("checkpoints_paths", None)
+if checkpoints_paths is None: checkpoints_paths = server_config["checkpoints_paths"] = fl.default_checkpoints_paths
+fl.set_checkpoints_paths(checkpoints_paths)
+three_levels_hierarchy = server_config.get("model_hierarchy_type", 0) == 1 and args.betatest
+
 #   Deprecated models
 for path in  ["wan2.1_Vace_1.3B_preview_bf16.safetensors", "sky_reels2_diffusion_forcing_1.3B_bf16.safetensors","sky_reels2_diffusion_forcing_720p_14B_bf16.safetensors",
 "sky_reels2_diffusion_forcing_720p_14B_quanto_int8.safetensors", "sky_reels2_diffusion_forcing_720p_14B_quanto_fp16_int8.safetensors", "wan2.1_image2video_480p_14B_bf16.safetensors", "wan2.1_image2video_480p_14B_quanto_int8.safetensors",
@@ -1841,11 +1868,11 @@ for path in  ["wan2.1_Vace_1.3B_preview_bf16.safetensors", "sky_reels2_diffusion
 "wan2.1_Vace_14B_mbf16.safetensors", "wan2.1_Vace_14B_quanto_mbf16_int8.safetensors", "wan2.1_FLF2V_720p_14B_quanto_int8.safetensors", "wan2.1_FLF2V_720p_14B_bf16.safetensors",  "wan2.1_FLF2V_720p_14B_fp16.safetensors", "wan2.1_Vace_1.3B_mbf16.safetensors", "wan2.1_text2video_1.3B_bf16.safetensors",
 "ltxv_0.9.7_13B_dev_bf16.safetensors"
 ]:
-    if Path(os.path.join("ckpts" , path)).is_file():
+    if fl.locate_file(path) is not None:
         print(f"Removing old version of model '{path}'. A new version of this model will be downloaded next time you use it.")
-        os.remove( os.path.join("ckpts" , path))
+        os.remove( fl.locate_file(path))
 
-for f, s in [("ckpts/Florence2/modeling_florence2.py", 127287)]:
+for f, s in [(fl.locate_file("Florence2/modeling_florence2.py"), 127287)]:
     try:
         if os.path.isfile(f) and os.path.getsize(f) == s:
             print(f"Removing old version of model '{f}'. A new version of this model will be downloaded next time you use it.")
@@ -1890,6 +1917,12 @@ def get_base_model_type(model_type):
     else:
         return model_def["architecture"]
 
+def get_parent_model_type(model_type):
+    base_model_type =  get_base_model_type(model_type)
+    if base_model_type is None: return None
+    model_def = get_model_def(base_model_type)
+    return model_def.get("parent_model_type", base_model_type)
+"vace_14B"
 def get_model_handler(model_type):
     base_model_type = get_base_model_type(model_type)
     if base_model_type is None:
@@ -2050,7 +2083,6 @@ def get_model_filename(model_type, quantization ="int8", dtype_policy = "", modu
             if len(stack) > 10: raise Exception(f"Circular Reference in Model {key_name} dependencies: {stack}")
             return get_model_filename(URLs, quantization=quantization, dtype_policy=dtype_policy, submodel_no = submodel_no, stack = stack + [URLs])
 
-    # choices = [ ("ckpts/" + os.path.basename(path) if path.startswith("http") else path)  for path in URLs ]
     choices = URLs
     if len(quantization) == 0:
         quantization = "bf16"
@@ -2259,7 +2291,7 @@ def init_model_def(model_type, model_def):
     base_model_type = get_base_model_type(model_type)
     family_handler = model_types_handlers.get(base_model_type, None)
     if family_handler is None:
-        raise Exception(f"Unknown model type {model_type}")
+        raise Exception(f"Unknown model type {base_model_type}")
     default_model_def = family_handler.query_model_def(base_model_type, model_def)
     if default_model_def is None: return model_def
     default_model_def.update(model_def)
@@ -2418,13 +2450,13 @@ def save_model(model, model_type, dtype,  config_file,  submodel_no = 1,  is_mod
         saved_finetune_def = json.load(reader)
 
     update_model_def = False
-    model_filename = os.path.join("ckpts",model_filename)
+    model_filename_path = os.path.join(fl.get_download_folder(), model_filename)
     quanto_dtypestr= "bf16" if dtype == torch.bfloat16 else "fp16"
     if ("m" + dtypestr) in model_filename: 
         dtypestr = "m" + dtypestr 
         quanto_dtypestr = "m" + quanto_dtypestr 
-    if not os.path.isfile(model_filename) and (not no_fp16_main_model or dtype == torch.bfloat16):
-        offload.save_model(model, model_filename, config_file_path=config_file, filter_sd=filter)
+    if fl.locate_file(model_filename) is None and (not no_fp16_main_model or dtype == torch.bfloat16):
+        offload.save_model(model, model_filename_path, config_file_path=config_file, filter_sd=filter)
         print(f"New model file '{model_filename}' had been created for finetune Id '{model_type}'.")
         del saved_finetune_def["model"][source_key]
         del model_def[source_key]
@@ -2433,10 +2465,11 @@ def save_model(model, model_type, dtype,  config_file,  submodel_no = 1,  is_mod
 
     if is_module:
         quanto_filename = model_filename.replace(dtypestr, "quanto_" + quanto_dtypestr + "_int8" )
+        quanto_filename_path = os.path.join(fl.get_download_folder() , quanto_filename)
         if hasattr(model, "_quanto_map"):
             print("unable to generate quantized module, the main model should at full 16 bits before quantization can be done")
-        elif not os.path.isfile(quanto_filename):
-            offload.save_model(model, quanto_filename, config_file_path=config_file, do_quantize= True, filter_sd=filter)
+        elif fl.locate_file(quanto_filename) is None:
+            offload.save_model(model, quanto_filename_path, config_file_path=config_file, do_quantize= True, filter_sd=filter)
             print(f"New quantized file '{quanto_filename}' had been created for finetune Id '{model_type}'.")
             if isinstance(model_def[url_key][0],dict): 
                 model_def[url_key][0][url_dict_key].append(quanto_filename) 
@@ -2473,10 +2506,11 @@ def save_quantized_model(model, model_type, model_filename, dtype,  config_file,
         pos = model_filename.rfind(".")
         model_filename =  model_filename[:pos] + "_quanto_int8" + model_filename[pos+1:] 
     
-    if os.path.isfile(model_filename):
+    if fl.locate_file(model_filename) is not None:
         print(f"There isn't any model to quantize as quantized model '{model_filename}' aready exists")
     else:
-        offload.save_model(model, model_filename, do_quantize= True, config_file_path=config_file)
+        model_filename_path = os.path.join(fl.get_download_folder(), model_filename)
+        offload.save_model(model, model_filename_path, do_quantize= True, config_file_path=config_file)
         print(f"New quantized file '{model_filename}' had been created for finetune Id '{model_type}'.")
         if not model_filename in URLs:
             URLs.append(model_filename)
@@ -2500,26 +2534,27 @@ def get_loras_preprocessor(transformer, model_type):
 
 def get_local_model_filename(model_filename):
     if model_filename.startswith("http"):
-        local_model_filename = os.path.join("ckpts", os.path.basename(model_filename))
+        local_model_filename =os.path.basename(model_filename)
     else:
         local_model_filename = model_filename
+    local_model_filename = fl.locate_file(local_model_filename)
     return local_model_filename
     
 
 
 def process_files_def(repoId, sourceFolderList, fileList):
-    targetRoot = "ckpts/" 
+    targetRoot = fl.get_download_location()
     for sourceFolder, files in zip(sourceFolderList,fileList ):
         if len(files)==0:
-            if not Path(targetRoot + sourceFolder).exists():
+            if fl.locate_folder(sourceFolder) is None:
                 snapshot_download(repo_id=repoId,  allow_patterns=sourceFolder +"/*", local_dir= targetRoot)
         else:
             for onefile in files:     
                 if len(sourceFolder) > 0: 
-                    if not os.path.isfile(targetRoot + sourceFolder + "/" + onefile ):          
+                    if fl.locate_file(sourceFolder + "/" + onefile) is None:   
                         hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = targetRoot, subfolder=sourceFolder)
                 else:
-                    if not os.path.isfile(targetRoot + onefile ):          
+                    if fl.locate_file(onefile) is None:          
                         hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = targetRoot)
 
 def download_mmaudio():
@@ -2541,15 +2576,18 @@ def download_file(url,filename):
         onefile = os.path.basename(url_parts[-1])
         sourceFolder = os.path.dirname(url_parts[-1])
         if len(sourceFolder) == 0:
-            hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = "ckpts/" if len(base_dir)==0 else base_dir)
+            hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = fl.get_download_location() if len(base_dir)==0 else base_dir)
         else:
-            target_path = "ckpts/temp/" + sourceFolder
+            temp_dir_path = os.path.join(fl.get_download_location(), "temp")
+            target_path = os.path.join(temp_dir_path, sourceFolder)
             if not os.path.exists(target_path):
                 os.makedirs(target_path)
-            hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = "ckpts/temp/", subfolder=sourceFolder)
-            shutil.move(os.path.join( "ckpts", "temp" , sourceFolder , onefile), "ckpts/" if len(base_dir)==0 else base_dir)
-            shutil.rmtree("ckpts/temp")
+            hf_hub_download(repo_id=repoId,  filename=onefile, local_dir = temp_dir_path, subfolder=sourceFolder)
+            shutil.move(os.path.join( target_path, onefile), fl.get_download_location() if len(base_dir)==0 else base_dir)
+            shutil.rmtree(temp_dir_path)
     else:
+        from urllib.request import urlretrieve
+        from shared.utils.download import create_progress_hook
         urlretrieve(url,filename, create_progress_hook(filename))
 
 download_shared_done = False
@@ -2563,8 +2601,6 @@ def download_models(model_filename = None, model_type= None, module_type = False
 
 
 
-    from urllib.request import urlretrieve
-    from shared.utils.download import create_progress_hook
 
     shared_def = {
         "repoId" : "DeepBeepMeep/Wan2.1",
@@ -2607,12 +2643,13 @@ def download_models(model_filename = None, model_type= None, module_type = False
     any_source = ("source2" if submodel_no ==2 else "source") in model_def
     any_module_source = ("module_source2" if submodel_no ==2 else "module_source") in model_def 
     model_type_handler = model_types_handlers[base_model_type]
-    local_model_filename = get_local_model_filename(model_filename)
-
+ 
     if any_source and not module_type or any_module_source and module_type:
         model_filename = None
     else:
-        if not os.path.isfile(local_model_filename):
+        local_model_filename = get_local_model_filename(model_filename)
+        if local_model_filename is None:
+            local_model_filename = fl.get_download_location(os.path.basename(model_filename))
             url = model_filename
 
             if not url.startswith("http"):
@@ -2621,14 +2658,15 @@ def download_models(model_filename = None, model_type= None, module_type = False
                 download_file(url, local_model_filename)
             except Exception as e:
                 if os.path.isfile(local_model_filename): os.remove(local_model_filename) 
-                raise Exception(f"'{url}' is invalid for Model '{local_model_filename}' : {str(e)}'")
+                raise Exception(f"'{url}' is invalid for Model '{model_type}' : {str(e)}'")
             if module_type: return
         model_filename = None
 
         preload_URLs = get_model_recursive_prop(model_type, "preload_URLs", return_list= True)
         for url in preload_URLs:
-            filename = "ckpts/" + url.split("/")[-1]
-            if not os.path.isfile(filename ): 
+            filename = fl.locate_file(os.path.basename(url))
+            if filename is None: 
+                filename = fl.get_download_location(os.path.basename(url))
                 if not url.startswith("http"):
                     raise Exception(f"File '{filename}' to preload was not found locally and no URL was provided to download it. Please add an URL in the model definition file.")
                 try:
@@ -2809,8 +2847,8 @@ def setup_prompt_enhancer(pipe, kwargs):
     model_no = server_config.get("enhancer_enabled", 0) 
     if model_no != 0:
         from transformers import ( AutoModelForCausalLM, AutoProcessor, AutoTokenizer, LlamaForCausalLM )
-        prompt_enhancer_image_caption_model = AutoModelForCausalLM.from_pretrained( "ckpts/Florence2", trust_remote_code=True)
-        prompt_enhancer_image_caption_processor = AutoProcessor.from_pretrained( "ckpts/Florence2", trust_remote_code=True)
+        prompt_enhancer_image_caption_model = AutoModelForCausalLM.from_pretrained(fl.locate_folder("Florence2"), trust_remote_code=True)
+        prompt_enhancer_image_caption_processor = AutoProcessor.from_pretrained(fl.locate_folder("Florence2"), trust_remote_code=True)
         pipe["prompt_enhancer_image_caption_model"] = prompt_enhancer_image_caption_model
         prompt_enhancer_image_caption_model._model_dtype = torch.float
         # def preprocess_sd(sd, map):
@@ -2825,12 +2863,12 @@ def setup_prompt_enhancer(pipe, kwargs):
 
         if model_no == 1:
             budget = 5000
-            prompt_enhancer_llm_model = offload.fast_load_transformers_model("ckpts/Llama3_2/Llama3_2_quanto_bf16_int8.safetensors")
-            prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/Llama3_2")
+            prompt_enhancer_llm_model = offload.fast_load_transformers_model( fl.locate_file("Llama3_2/Llama3_2_quanto_bf16_int8.safetensors"))
+            prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained(fl.locate_folder("Llama3_2"))
         else:
             budget = 10000
-            prompt_enhancer_llm_model = offload.fast_load_transformers_model("ckpts/llama-joycaption-beta-one-hf-llava/llama_joycaption_quanto_bf16_int8.safetensors")
-            prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained("ckpts/llama-joycaption-beta-one-hf-llava")
+            prompt_enhancer_llm_model = offload.fast_load_transformers_model(fl.locate_file("llama-joycaption-beta-one-hf-llava/llama_joycaption_quanto_bf16_int8.safetensors"))
+            prompt_enhancer_llm_tokenizer = AutoTokenizer.from_pretrained(fl.locate_folder("llama-joycaption-beta-one-hf-llava"))
         pipe["prompt_enhancer_llm_model"] = prompt_enhancer_llm_model
         if not "budgets" in kwargs: kwargs["budgets"] = {}
         kwargs["budgets"]["prompt_enhancer_llm_model"] = budget 
@@ -2875,7 +2913,7 @@ def load_models(model_type, override_profile = -1):
     if model_filename2 != None:
         model_file_list += [model_filename2]
         model_type_list += [model_type]
-        module_type_list += [False]
+        module_type_list += [None]
         model_submodel_no_list += [2]
     for module_type in modules:
         if isinstance(module_type,dict):
@@ -2982,6 +3020,7 @@ def release_RAM():
 
 def apply_changes(  state,
                     transformer_types_choices,
+                    model_hierarchy_type_choice,
                     transformer_dtype_policy_choice,
                     text_encoder_quantization_choice,
                     VAE_precision_choice,
@@ -3012,15 +3051,20 @@ def apply_changes(  state,
                     image_output_codec_choice = None,
                     audio_output_codec_choice = None,
                     last_resolution_choice = None,
+                    checkpoints_paths = "",
 ):
+    checkpoints_paths = fl.default_checkpoints_paths if len(checkpoints_paths.strip()) == "" else checkpoints_paths.replace("\r", "").split("\n")
+    checkpoints_paths = [path.strip() for path in checkpoints_paths if len(path.strip()) > 0 ]
+    fl.set_checkpoints_paths(checkpoints_paths)
     if args.lock_config:
-        return "<DIV ALIGN=CENTER>Config Locked</DIV>",*[gr.update()]*4
+        return "<DIV ALIGN=CENTER>Config Locked</DIV>",*[gr.update()]*5
     if gen_in_progress:
-        return "<DIV ALIGN=CENTER>Unable to change config when a generation is in progress</DIV>",*[gr.update()]*4
+        return "<DIV ALIGN=CENTER>Unable to change config when a generation is in progress</DIV>",*[gr.update()]*5
     global offloadobj, wan_model, server_config, loras, default_loras_choices, default_loras_multis_str, default_lora_preset_prompt, default_lora_preset, loras_presets
     server_config = {
         "attention_mode" : attention_choice,  
         "transformer_types": transformer_types_choices, 
+        "model_hierarchy_type": model_hierarchy_type_choice,
         "text_encoder_quantization" : text_encoder_quantization_choice,
         "save_path" : save_path_choice,
         "image_save_path" : image_save_path_choice,
@@ -3051,9 +3095,11 @@ def apply_changes(  state,
         "audio_output_codec" : audio_output_codec_choice,
         "last_model_type" : state["model_type"],
         "last_model_per_family":  state["last_model_per_family"],
+        "last_model_per_type":  state["last_model_per_type"],
         "last_advanced_choice": state["advanced"], 
         "last_resolution_choice": last_resolution_choice, 
         "last_resolution_per_group":  state["last_resolution_per_group"],
+        "checkpoints_paths": checkpoints_paths,
     }
 
     if Path(server_config_filename).is_file():
@@ -3074,7 +3120,8 @@ def apply_changes(  state,
         if v != v_old:
             changes.append(k)
 
-    global attention_mode, default_profile, compile, vae_config, boost, lora_dir, reload_needed, preload_model_policy, transformer_quantization, transformer_dtype_policy, transformer_types, text_encoder_quantization, save_path 
+    global attention_mode, default_profile, compile, vae_config, boost, lora_dir, reload_needed, preload_model_policy, transformer_quantization, transformer_dtype_policy, transformer_types, text_encoder_quantization, save_path , three_levels_hierarchy
+    three_levels_hierarchy= server_config["model_hierarchy_type"] == 1 
     attention_mode = server_config["attention_mode"]
     default_profile = server_config["profile"]
     compile = server_config["compile"]
@@ -3087,23 +3134,27 @@ def apply_changes(  state,
     transformer_quantization = server_config["transformer_quantization"]
     transformer_dtype_policy = server_config["transformer_dtype_policy"]
     text_encoder_quantization = server_config["text_encoder_quantization"]
-    transformer_types = server_config["transformer_types"]
-    model_filename = get_model_filename(transformer_type, transformer_quantization, transformer_dtype_policy)
+    transformer_types = server_config["transformer_types"]    
+    model_type = state["model_type"]
+    model_filename = get_model_filename(model_type, transformer_quantization, transformer_dtype_policy)
     state["model_filename"] = model_filename
     if "enhancer_enabled" in changes or "enhancer_mode" in changes:
         reset_prompt_enhancer()
     if all(change in ["attention_mode", "vae_config", "boost", "save_path", "metadata_type", "clear_file_list", "fit_canvas", "depth_anything_v2_variant", 
                       "notification_sound_enabled", "notification_sound_volume", "mmaudio_enabled", "max_frames_multiplier", "display_stats",
-                      "video_output_codec", "image_output_codec", "audio_output_codec"] for change in changes ):
+                      "video_output_codec", "image_output_codec", "audio_output_codec", "checkpoints_paths", "model_hierarchy_type"] for change in changes ):
         model_family = gr.Dropdown()
+        model_base_type = gr.Dropdown()
         model_choice = gr.Dropdown()
+        if "model_hierarchy_type" in changes:
+            model_family, model_base_type, model_choice = generate_dropdown_model_list(model_type)
     else:
         reload_needed = True
-        model_family, model_choice = generate_dropdown_model_list(transformer_type)
+        model_family, model_base_type, model_choice = generate_dropdown_model_list(model_type)
 
     header = generate_header(state["model_type"], compile=compile, attention_mode= attention_mode)
     mmaudio_enabled = server_config["mmaudio_enabled"] > 0
-    return "<DIV ALIGN=CENTER>The new configuration has been succesfully applied</DIV>", header, model_family, model_choice, get_unique_id()
+    return "<DIV ALIGN=CENTER>The new configuration has been succesfully applied</DIV>", header, model_family, model_base_type, model_choice, get_unique_id()
 
 def get_gen_info(state):
     cache = state.get("gen", None)
@@ -3480,7 +3531,7 @@ def select_video(state, input_file_list, event_data: gr.EventData):
             video_num_inference_steps = configs.get("num_inference_steps", 0)
             video_creation_date = str(get_file_creation_date(file_name))
             if "." in video_creation_date: video_creation_date = video_creation_date[:video_creation_date.rfind(".")]
-            video_generation_time =  str(configs.get("generation_time", "0")) + "s"
+            video_generation_time = format_generation_time(float(configs.get("generation_time", "0")))
             video_activated_loras = configs.get("activated_loras", [])
             video_loras_multipliers = configs.get("loras_multipliers", "")
             video_loras_multipliers =  preparse_loras_multipliers(video_loras_multipliers)
@@ -3497,6 +3548,9 @@ def select_video(state, input_file_list, event_data: gr.EventData):
             if len(video_outpainting) >0:
                 values += [video_outpainting]
                 labels += ["Outpainting"]
+            if "G" in video_video_prompt_type and "V" in video_video_prompt_type:
+                values += [configs.get("denoising_strength",1)]
+                labels += ["Denoising Strength"]
             video_sample_solver = configs.get("sample_solver", "")
             if model_def.get("sample_solvers", None) is not None and len(video_sample_solver) > 0 :
                 values += [video_sample_solver]
@@ -3527,7 +3581,7 @@ def select_video(state, input_file_list, event_data: gr.EventData):
             control_net_weight_alt_name = model_def.get("control_net_weight_alt_name", "")
             if len(control_net_weight_alt_name) >0:
                 if len(control_net_weight): control_net_weight += ", "
-                control_net_weight += control_net_weight_alt_name + "=" + str(configs.get("control_net_alt", 1))
+                control_net_weight += control_net_weight_alt_name + "=" + str(configs.get("control_net_weight_alt", 1))
             if len(control_net_weight) > 0: 
                 values += [control_net_weight]
                 labels += ["Control Net Weights"]      
@@ -3649,28 +3703,23 @@ def get_preprocessor(process_type, inpaint_color):
     if process_type=="pose":
         from preprocessing.dwpose.pose import PoseBodyFaceVideoAnnotator
         cfg_dict = {
-            "DETECTION_MODEL": "ckpts/pose/yolox_l.onnx",
-            "POSE_MODEL": "ckpts/pose/dw-ll_ucoco_384.onnx",
+            "DETECTION_MODEL": fl.locate_file("pose/yolox_l.onnx"),
+            "POSE_MODEL": fl.locate_file("pose/dw-ll_ucoco_384.onnx"),
             "RESIZE_SIZE": 1024
         }
         anno_ins = lambda img: PoseBodyFaceVideoAnnotator(cfg_dict).forward(img)
     elif process_type=="depth":
-        # from preprocessing.midas.depth import DepthVideoAnnotator
-        # cfg_dict = {
-        #     "PRETRAINED_MODEL": "ckpts/depth/dpt_hybrid-midas-501f0c75.pt"
-        # }
-        # anno_ins = lambda img: DepthVideoAnnotator(cfg_dict).forward(img)[0]
 
         from preprocessing.depth_anything_v2.depth import DepthV2VideoAnnotator
 
         if server_config.get("depth_anything_v2_variant", "vitl") == "vitl":
             cfg_dict = {
-                "PRETRAINED_MODEL": "ckpts/depth/depth_anything_v2_vitl.pth",
+                "PRETRAINED_MODEL": fl.locate_file("depth/depth_anything_v2_vitl.pth"),
                 'MODEL_VARIANT': 'vitl'
             }
         else:
             cfg_dict = {
-                "PRETRAINED_MODEL": "ckpts/depth/depth_anything_v2_vitb.pth",
+                "PRETRAINED_MODEL": fl.locate_file("depth/depth_anything_v2_vitb.pth"),
                 'MODEL_VARIANT': 'vitb',
             }
 
@@ -3682,19 +3731,19 @@ def get_preprocessor(process_type, inpaint_color):
     elif process_type=="canny":
         from preprocessing.canny import CannyVideoAnnotator
         cfg_dict = {
-                "PRETRAINED_MODEL": "ckpts/scribble/netG_A_latest.pth"
+                "PRETRAINED_MODEL": fl.locate_file("scribble/netG_A_latest.pth")
             }
         anno_ins = lambda img: CannyVideoAnnotator(cfg_dict).forward(img)
     elif process_type=="scribble":
         from preprocessing.scribble import ScribbleVideoAnnotator
         cfg_dict = {
-                "PRETRAINED_MODEL": "ckpts/scribble/netG_A_latest.pth"
+                "PRETRAINED_MODEL": fl.locate_file("scribble/netG_A_latest.pth")
             }
         anno_ins = lambda img: ScribbleVideoAnnotator(cfg_dict).forward(img)
     elif process_type=="flow":
         from preprocessing.flow import FlowVisAnnotator
         cfg_dict = {
-                "PRETRAINED_MODEL": "ckpts/flow/raft-things.pth"
+                "PRETRAINED_MODEL": fl.locate_file("flow/raft-things.pth")
             }
         anno_ins = lambda img: FlowVisAnnotator(cfg_dict).forward(img)
     elif process_type=="inpaint":
@@ -4092,10 +4141,10 @@ def perform_temporal_upsampling(sample, previous_last_frame, temporal_upsampling
         if previous_last_frame != None:
             sample = torch.cat([previous_last_frame, sample], dim=1)
             previous_last_frame = sample[:, -1:].clone()
-            sample = temporal_interpolation( os.path.join("ckpts", "flownet.pkl"), sample, exp, device=processing_device)
+            sample = temporal_interpolation( fl.locate_file("flownet.pkl"), sample, exp, device=processing_device)
             sample = sample[:, 1:]
         else:
-            sample = temporal_interpolation( os.path.join("ckpts", "flownet.pkl"), sample, exp, device=processing_device)
+            sample = temporal_interpolation( fl.locate_file("flownet.pkl"), sample, exp, device=processing_device)
             previous_last_frame = sample[:, -1:].clone()
 
         output_fps = output_fps * 2**exp
@@ -4359,6 +4408,7 @@ def process_prompt_enhancer(prompt_enhancer, original_prompts,  image_start, ori
     prompt_images = []
     if "I" in prompt_enhancer:
         if image_start != None:
+            if not isinstance(image_start, list): image_start= [image_start] 
             prompt_images += image_start
         if original_image_refs != None:
             prompt_images += original_image_refs[:1]
@@ -4814,6 +4864,7 @@ def generate_video(
     trans.cache = skip_steps_cache
     if trans2 is not None: trans2.cache = skip_steps_cache
     face_arc_embeds = None
+    src_ref_images = src_ref_masks = None
     output_new_audio_data = None
     output_new_audio_filepath = None
     original_audio_guide = audio_guide
@@ -4908,7 +4959,7 @@ def generate_video(
 
     first_window_video_length = current_video_length
     original_prompts = prompts.copy()
-    gen["sliding_window"] = sliding_window    
+    gen["sliding_window"] = sliding_window 
     while not abort: 
         extra_generation += gen.get("extra_orders",0)
         gen["extra_orders"] = 0
@@ -4918,7 +4969,7 @@ def generate_video(
         if repeat_no >= total_generation: break
         repeat_no +=1
         gen["repeat_no"] = repeat_no
-        src_video = src_video2 = src_mask = src_mask2 = src_faces = src_ref_images = src_ref_masks = sparse_video_image = None
+        src_video = src_video2 = src_mask = src_mask2 = src_faces = sparse_video_image = None
         prefix_video = pre_video_frame = None
         source_video_overlap_frames_count = 0 # number of frames overalapped in source video for first window
         source_video_frames_count = 0  # number of frames to use in source video (processing starts source_video_overlap_frames_count frames before )
@@ -5011,7 +5062,7 @@ def generate_video(
             aligned_guide_start_frame = guide_start_frame - alignment_shift
             aligned_guide_end_frame = guide_end_frame - alignment_shift
             aligned_window_start_frame = window_start_frame - alignment_shift  
-            if fantasy:
+            if fantasy and audio_guide is not None:
                 audio_proj_split , audio_context_lens = parse_audio(audio_guide, start_frame = aligned_window_start_frame, num_frames= current_video_length, fps= fps,  device= processing_device  )
             if multitalk:
                 from models.wan.multitalk.multitalk import get_window_audio_embeddings
@@ -5175,6 +5226,7 @@ def generate_video(
                             if any_mask: save_video( src_mask2, "masks2.mp4", fps, value_range=(0, 1))
                 if video_guide is not None:                        
                     preview_frame_no = 0 if extract_guide_from_window_start or model_def.get("dont_cat_preguide", False) or sparse_video_image is not None else (guide_start_frame - window_start_frame) 
+                    preview_frame_no = min(src_video.shape[1] -1, preview_frame_no)
                     refresh_preview["video_guide"] = convert_tensor_to_image(src_video, preview_frame_no)
                     if src_video2 is not None:
                         refresh_preview["video_guide"] = [refresh_preview["video_guide"], convert_tensor_to_image(src_video2, preview_frame_no)] 
@@ -5838,13 +5890,12 @@ def get_new_preset_msg(advanced = True):
         return "Choose a Lora Preset or a Settings file in this List"
     
 def compute_lset_choices(model_type, loras_presets):
-    # top_dir = "settings"
     global_list = []
     if model_type is not None:
-        top_dir = get_lora_dir(model_type)
+        top_dir = "profiles" # get_lora_dir(model_type)
         model_def = get_model_def(model_type)
-        settings_dir = get_model_recursive_prop(model_type, "settings_dir", return_list=False)
-        if settings_dir is None or len(settings_dir) == 0: settings_dir = [get_model_family(model_type, True)]
+        settings_dir = get_model_recursive_prop(model_type, "profiles_dir", return_list=False)
+        if settings_dir is None or len(settings_dir) == 0: settings_dir = [""]
         for dir in settings_dir:
             if len(dir) == "": continue
             cur_path = os.path.join(top_dir, dir)
@@ -5867,7 +5918,7 @@ def compute_lset_choices(model_type, loras_presets):
     indent = chr(160) * 4
     lset_choices = []
     if len(global_list) > 0:
-        lset_choices += [( (sep*16) +"Profiles" + (sep*17), ">Profiles")]
+        lset_choices += [( (sep*12) +"Accelerators Profiles" + (sep*13), ">profiles")]
         lset_choices += [ ( indent   + os.path.splitext(os.path.basename(preset))[0], preset) for preset in global_list ]
     if len(settings_list) > 0:
         settings_list.sort()
@@ -5936,6 +5987,8 @@ def save_lset(state, lset_name, loras_choices, loras_mult_choices, prompt, save_
             lset = collect_current_model_settings(state)
             extension = ".json" 
         else:
+            from shared.utils.loras_mutipliers import extract_loras_side
+            loras_choices, loras_mult_choices = extract_loras_side(loras_choices, loras_mult_choices, "after")
             lset  = {"loras" : loras_choices, "loras_mult" : loras_mult_choices}
             if save_lset_prompt_cbox!=1:
                 prompts = prompt.replace("\r", "").split("\n")
@@ -6046,6 +6099,7 @@ def refresh_lora_list(state, lset_name, loras_choices):
 def update_lset_type(state, lset_name):
     return 1 if lset_name.endswith(".lset") else 2
 
+from shared.utils.loras_mutipliers import merge_loras_settings
 
 def apply_lset(state, wizard_prompt_activated, lset_name, loras_choices, loras_mult_choices, prompt):
 
@@ -6054,13 +6108,14 @@ def apply_lset(state, wizard_prompt_activated, lset_name, loras_choices, loras_m
     lset_name = get_lset_name(state, lset_name)
     if len(lset_name) == 0:
         gr.Info("Please choose a Lora Preset or Setting File in the list or create one")
-        return wizard_prompt_activated, loras_choices, loras_mult_choices, prompt, gr.update(), gr.update(), gr.update(), gr.update()
+        return wizard_prompt_activated, loras_choices, loras_mult_choices, prompt, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
     else:
         current_model_type = state["model_type"]
+        ui_settings = get_current_model_settings(state)
+        old_activated_loras, old_loras_multipliers  = ui_settings.get("activated_loras", []), ui_settings.get("loras_multipliers", ""),
         if lset_name.endswith(".lset"):
             loras = state["loras"]
             loras_choices, loras_mult_choices, preset_prompt, full_prompt, error = extract_preset(current_model_type,  lset_name, loras)
-            loras_choices = update_loras_url_cache(get_lora_dir(current_model_type), loras_choices)
             if full_prompt:
                 prompt = preset_prompt
             elif len(preset_prompt) > 0:
@@ -6068,27 +6123,33 @@ def apply_lset(state, wizard_prompt_activated, lset_name, loras_choices, loras_m
                 prompts = [prompt for prompt in prompts if len(prompt)>0 and not prompt.startswith("#")]
                 prompt = "\n".join(prompts) 
                 prompt = preset_prompt + '\n' + prompt
+            loras_choices, loras_mult_choices = merge_loras_settings(old_activated_loras, old_loras_multipliers, loras_choices, loras_mult_choices, "merge after")
+            loras_choices = update_loras_url_cache(get_lora_dir(current_model_type), loras_choices)
+            loras_choices = [os.path.basename(lora) for lora in loras_choices]
             gr.Info(f"Lora Preset '{lset_name}' has been applied")
             state["apply_success"] = 1
             wizard_prompt_activated = "on"
 
-            return wizard_prompt_activated, loras_choices, loras_mult_choices, prompt, get_unique_id(), gr.update(), gr.update(), gr.update()
+            return wizard_prompt_activated, loras_choices, loras_mult_choices, prompt, get_unique_id(), gr.update(), gr.update(), gr.update(), gr.update()
         else:
-            # lset_path =  os.path.join("settings", lset_name) if len(Path(lset_name).parts)>1 else os.path.join(get_lora_dir(current_model_type), lset_name)
-            lset_path =  os.path.join(get_lora_dir(current_model_type), lset_name)
-            configs, _ = get_settings_from_file(state,lset_path , True, True, True, min_settings_version=2.38)
+            accelerator_profile =  len(Path(lset_name).parts)>1 
+            lset_path =  os.path.join("profiles" if accelerator_profile else get_lora_dir(current_model_type), lset_name)
+            configs, _ = get_settings_from_file(state,lset_path , True, True, True, min_settings_version=2.38, merge_loras = "merge after" if  len(Path(lset_name).parts)<=1 else "merge before" )
+
             if configs == None:
                 gr.Info("File not supported")
-                return [gr.update()] * 8
+                return [gr.update()] * 9
             model_type = configs["model_type"]
             configs["lset_name"] = lset_name
-            gr.Info(f"Settings File '{lset_name}' has been applied")
+            if accelerator_profile:
+                gr.Info(f"Accelerator Profile '{os.path.splitext(os.path.basename(lset_name))[0]}' has been applied")
+            else:
+                gr.Info(f"Settings File '{os.path.basename(lset_name)}' has been applied")
             help = configs.get("help", None)
             if help is not None: gr.Info(help)
-
             if model_type == current_model_type:
                 set_model_settings(state, current_model_type, configs)        
-                return *[gr.update()] * 4, gr.update(), gr.update(), gr.update(), get_unique_id()
+                return *[gr.update()] * 4, gr.update(), gr.update(), gr.update(), gr.update(), get_unique_id()
             else:
                 set_model_settings(state, model_type, configs)        
                 return *[gr.update()] * 4, gr.update(), *generate_dropdown_model_list(model_type), gr.update()
@@ -6268,7 +6329,7 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
         inputs["base_model_type"] = base_model_type
     diffusion_forcing = base_model_type in ["sky_df_1.3B", "sky_df_14B"]
     vace =  test_vace_module(base_model_type) 
-    t2v=   base_model_type in ["t2v"]
+    t2v=   base_model_type in ["t2v", "t2v_2_2"]
     ltxv = base_model_type in ["ltxv_13B"]
     recammaster = base_model_type in ["recam_1.3B"]
     phantom = base_model_type in ["phantom_1.3B", "phantom_14B"]
@@ -6302,10 +6363,8 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
     if model_def.get("model_modes", None) is None:
         pop += ["model_mode"]
 
-    if not vace and not phantom and not hunyuan_video_custom:
-        unsaved_params = ["keep_frames_video_guide", "mask_expand"] #"video_prompt_type",  
-        if base_model_type in ["t2v"]: unsaved_params = unsaved_params[1:]
-        pop += unsaved_params
+    if model_def.get("guide_custom_choices", None ) is None and model_def.get("guide_preprocessing", None ) is None:
+        pop += ["keep_frames_video_guide", "mask_expand"]
 
     if not "I" in video_prompt_type:
         pop += ["remove_background_images_ref"]
@@ -6316,7 +6375,7 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
         pop += ["frames_positions", "control_net_weight", "control_net_weight2"] 
 
     if not len(model_def.get("control_net_weight_alt_name", "")) >0:
-        pop += ["control_net_alt"]
+        pop += ["control_net_weight_alt"]
                         
     if model_def.get("video_guide_outpainting", None) is None:
         pop += ["video_guide_outpainting"] 
@@ -6598,13 +6657,13 @@ def use_video_settings(state, input_file_list, choice):
             else:
                 gr.Info(f"Settings Loaded from Video with prompt '{prompt[:100]}'")
             if models_compatible:
-                return gr.update(), gr.update(), str(time.time())
+                return gr.update(), gr.update(), gr.update(), str(time.time())
             else:
                 return *generate_dropdown_model_list(model_type), gr.update()
     else:
         gr.Info(f"No Video is Selected")
 
-    return gr.update(), gr.update()
+    return gr.update(), gr.update(), gr.update(), gr.update()
 loras_url_cache = None
 def update_loras_url_cache(lora_dir, loras_selected):
     if loras_selected is None: return None
@@ -6625,7 +6684,7 @@ def update_loras_url_cache(lora_dir, loras_selected):
         base_name = os.path.basename(lora)
         local_name = os.path.join(lora_dir, base_name)
         url = loras_url_cache.get(local_name, base_name)
-        if lora.startswith("http:") or lora.startswith("https:") and url != lora:
+        if (lora.startswith("http:") or lora.startswith("https:")) and url != lora:
             loras_url_cache[local_name]=lora
             update = True
         new_loras_selected.append(url)
@@ -6636,7 +6695,7 @@ def update_loras_url_cache(lora_dir, loras_selected):
 
     return new_loras_selected
 
-def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, switch_type_if_compatible, min_settings_version = 0):    
+def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, switch_type_if_compatible, min_settings_version = 0, merge_loras = None):    
     configs = None
     any_image_or_video = False
     if file_path.endswith(".json") and allow_json:
@@ -6671,7 +6730,6 @@ def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, sw
     if configs is None: return None, False
         
 
-    current_model_filename = state["model_filename"]
     current_model_type = state["model_type"]
     
     model_type = configs.get("model_type", None)
@@ -6679,7 +6737,7 @@ def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, sw
         model_type = configs.get("base_model_type", None)
   
     if model_type == None:
-        model_filename = configs.get("model_filename", current_model_filename)
+        model_filename = configs.get("model_filename", "")
         model_type = get_model_type(model_filename)
         if model_type == None:
             model_type = current_model_type
@@ -6687,16 +6745,28 @@ def get_settings_from_file(state, file_path, allow_json, merge_with_defaults, sw
         model_type = current_model_type
     if switch_type_if_compatible and are_model_types_compatible(model_type,current_model_type):
         model_type = current_model_type
+    old_loras_selected = old_loras_multipliers = None
     if merge_with_defaults:
         defaults = get_model_settings(state, model_type) 
         defaults = get_default_settings(model_type) if defaults == None else defaults
+        if merge_loras is not None and model_type == current_model_type:
+            old_loras_selected, old_loras_multipliers  = defaults.get("activated_loras", []), defaults.get("loras_multipliers", ""),
         defaults.update(configs)
         configs = defaults
 
-    loras_selected =configs.get("activated_loras", None)
-    if loras_selected is not None:
-        configs["activated_loras"]= update_loras_url_cache(get_lora_dir(model_type), loras_selected)
+    loras_selected =configs.get("activated_loras", [])
+    loras_multipliers = configs.get("loras_multipliers", "")
+    if loras_selected is not None and len(loras_selected) > 0:
+        loras_selected = update_loras_url_cache(get_lora_dir(model_type), loras_selected)
+    if old_loras_selected is not None:
+        if len(old_loras_selected) == 0 and "|" in loras_multipliers:
+            pass
+        else:
+            old_loras_selected = update_loras_url_cache(get_lora_dir(model_type), old_loras_selected)
+            loras_selected, loras_multipliers = merge_loras_settings(old_loras_selected, old_loras_multipliers, loras_selected, loras_multipliers, merge_loras )
 
+    configs["activated_loras"]= loras_selected or []
+    configs["loras_multipliers"] = loras_multipliers       
     fix_settings(model_type, configs, min_settings_version)
     configs["model_type"] = model_type
 
@@ -6729,12 +6799,12 @@ def load_settings_from_file(state, file_path):
     gen = get_gen_info(state)
 
     if file_path==None:
-        return gr.update(), gr.update(), None
+        return gr.update(), gr.update(), gr.update(), gr.update(), None
 
     configs, any_video_or_image_file = get_settings_from_file(state, file_path, True, True, True)
     if configs == None:
         gr.Info("File not supported")
-        return gr.update(), gr.update(), None
+        return gr.update(), gr.update(), gr.update(), gr.update(), None
 
     current_model_type = state["model_type"]
     model_type = configs["model_type"]
@@ -6748,7 +6818,7 @@ def load_settings_from_file(state, file_path):
 
     if model_type == current_model_type:
         set_model_settings(state, current_model_type, configs)        
-        return gr.update(), gr.update(), str(time.time()), None
+        return gr.update(), gr.update(), gr.update(), str(time.time()), None
     else:
         set_model_settings(state, model_type, configs)        
         return *generate_dropdown_model_list(model_type), gr.update(), None
@@ -6850,7 +6920,6 @@ def save_inputs(
 ):
 
 
-    model_filename = state["model_filename"]
     model_type = state["model_type"]
     if image_mask_guide is not None and image_mode >= 1 and video_prompt_type is not None and "A" in video_prompt_type and not "U" in video_prompt_type:
     # if image_mask_guide is not None and image_mode == 2:
@@ -6955,6 +7024,11 @@ def change_model(state, model_choice):
     last_model_per_family = state["last_model_per_family"] 
     last_model_per_family[get_model_family(model_choice, for_ui= True)] = model_choice
     server_config["last_model_per_family"] = last_model_per_family
+
+    last_model_per_type = state["last_model_per_type"] 
+    last_model_per_type[get_base_model_type(model_choice)] = model_choice
+    server_config["last_model_per_type"] = last_model_per_type
+
     server_config["last_model_type"] = model_choice
 
     with open(server_config_filename, "w", encoding="utf-8") as writer:
@@ -7474,7 +7548,7 @@ def download_lora(state, lora_url, progress=gr.Progress(track_tqdm=True),):
     
 
 
-def generate_video_tab(update_form = False, state_dict = None, ui_defaults = None, model_family = None, model_choice = None, header = None, main = None, main_tabs= None):
+def generate_video_tab(update_form = False, state_dict = None, ui_defaults = None, model_family = None, model_base_type_choice = None, model_choice = None, header = None, main = None, main_tabs= None):
     global inputs_names #, advanced
 
     if update_form:
@@ -7491,6 +7565,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
         state_dict["model_type"] = model_type
         state_dict["advanced"] = advanced_ui
         state_dict["last_model_per_family"] = server_config.get("last_model_per_family", {})
+        state_dict["last_model_per_type"] = server_config.get("last_model_per_type", {})
         state_dict["last_resolution_per_group"] = server_config.get("last_resolution_per_group", {})
         gen = dict()
         gen["queue"] = []
@@ -7526,7 +7601,6 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
     if len(launch_loras) == 0:
         launch_multis_str = ui_defaults.get("loras_multipliers","")
         launch_loras = [os.path.basename(path) for path in ui_defaults.get("activated_loras",[])]
-
     with gr.Row():
         with gr.Column():
             with gr.Column(visible=False, elem_id="image-modal-container") as modal_container: 
@@ -7565,7 +7639,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         cancel_lset_btn = gr.Button("Don't do it !", size="sm", min_width= 1 , visible=False)  
                         #confirm_save_lset_btn, confirm_delete_lset_btn, save_lset_btn, delete_lset_btn, cancel_lset_btn
             trigger_refresh_input_type = gr.Text(interactive= False, visible= False)
-            t2v =  base_model_type in ["t2v"] 
+            t2v =  base_model_type in ["t2v", "t2v_2_2"] 
             t2v_1_3B =  base_model_type in ["t2v_1.3B"] 
             flf2v = base_model_type == "flf2v_720p"
             base_model_family = get_model_family(base_model_type)
@@ -8597,7 +8671,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             ).then(fn=save_inputs,
                 inputs =[target_state] + gen_inputs,
                 outputs= None
-            ).then( fn=use_video_settings, inputs =[state, output, last_choice] , outputs= [model_family, model_choice, refresh_form_trigger])
+            ).then( fn=use_video_settings, inputs =[state, output, last_choice] , outputs= [model_family, model_base_type_choice, model_choice, refresh_form_trigger])
 
 
             prompt_enhancer_btn.click(fn=validate_wizard_prompt,
@@ -8642,7 +8716,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             confirm_delete_lset_btn.click(delete_lset, inputs=[state, lset_name], outputs=[lset_name, apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_delete_lset_btn, cancel_lset_btn ])
             cancel_lset_btn.click(cancel_lset, inputs=[], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn, confirm_delete_lset_btn,confirm_save_lset_btn, cancel_lset_btn,save_lset_prompt_drop ])
             apply_lset_btn.click(fn=save_inputs, inputs =[target_state] + gen_inputs, outputs= None).then(fn=apply_lset, 
-                inputs=[state, wizard_prompt_activated_var, lset_name,loras_choices, loras_multipliers, prompt], outputs=[wizard_prompt_activated_var, loras_choices, loras_multipliers, prompt, fill_wizard_prompt_trigger, model_family, model_choice, refresh_form_trigger])
+                inputs=[state, wizard_prompt_activated_var, lset_name,loras_choices, loras_multipliers, prompt], outputs=[wizard_prompt_activated_var, loras_choices, loras_multipliers, prompt, fill_wizard_prompt_trigger, model_family, model_base_type_choice, model_choice, refresh_form_trigger])
             refresh_lora_btn.click(refresh_lora_list, inputs=[state, lset_name,loras_choices], outputs=[lset_name, loras_choices])
             refresh_lora_btn2.click(refresh_lora_list, inputs=[state, lset_name,loras_choices], outputs=[lset_name, loras_choices])
 
@@ -8681,7 +8755,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             ).then(fn=save_inputs,
                 inputs =[target_state] + gen_inputs,
                 outputs= None
-            ).then(fn=load_settings_from_file, inputs =[state, settings_file] , outputs= [model_family, model_choice, refresh_form_trigger, settings_file])
+            ).then(fn=load_settings_from_file, inputs =[state, settings_file] , outputs= [model_family, model_base_type_choice, model_choice, refresh_form_trigger, settings_file])
 
 
             reset_settings_btn.click(fn=validate_wizard_prompt,
@@ -8710,7 +8784,8 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 show_progress="hidden",
             )                
 
-            model_family.input(fn=change_model_family, inputs=[state, model_family], outputs= [model_choice])
+            model_family.input(fn=change_model_family, inputs=[state, model_family], outputs= [model_base_type_choice, model_choice], show_progress="hidden")
+            model_base_type_choice.input(fn=change_model_base_types, inputs=[state, model_family, model_base_type_choice], outputs= [model_base_type_choice, model_choice], show_progress="hidden")
 
             model_choice.change(fn=validate_wizard_prompt,
                 inputs= [state, wizard_prompt_activated_var, wizard_variables_var,  prompt, wizard_prompt, *prompt_vars] ,
@@ -8898,13 +8973,13 @@ def generate_download_tab(lset_name,loras_choices, state):
     download_loras_btn.click(fn=download_loras, inputs=[], outputs=[download_status_row, download_status]).then(fn=refresh_lora_list, inputs=[state, lset_name,loras_choices], outputs=[lset_name, loras_choices])
 
     
-def generate_configuration_tab(state, blocks, header, model_family, model_choice, resolution, refresh_form_trigger):
+def generate_configuration_tab(state, blocks, header, model_family, model_base_type_choice, model_choice, resolution, refresh_form_trigger):
     gr.Markdown("Please click Apply Changes at the bottom so that the changes are effective. Some choices below may be locked if the app has been launched by specifying a config preset.")
     with gr.Column():
         with gr.Tabs():
             # with gr.Row(visible=advanced_ui) as advanced_row:
             with gr.Tab("General"):
-                dropdown_families, dropdown_choices = get_sorted_dropdown(displayed_model_types, None)
+                _, _, dropdown_choices = get_sorted_dropdown(displayed_model_types, None, None, False)
 
                 transformer_types_choices = gr.Dropdown(
                     choices= dropdown_choices,
@@ -8913,6 +8988,18 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                     scale= 2,
                     multiselect= True
                     )
+
+                model_hierarchy_type_choice = gr.Dropdown(
+                    choices=[
+                        ("Two Levels: Model Family > Models & Finetunes", 0),
+                        ("Three Levels: Model Family > Models > Finetunes", 1),
+                    ],
+                    value= server_config.get("model_hierarchy_type", 1),
+                    label= "Models Hierarchy In User Interface",
+                    visible=args.betatest, 
+                    scale= 2,
+                    )
+
 
                 fit_canvas_choice = gr.Dropdown(
                     choices=[
@@ -8998,6 +9085,8 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                     value=server_config.get("max_frames_multiplier", 1),
                     label="Increase the Max Number of Frames (needs more RAM and VRAM, usually the longer the worse the quality, needs an App restart)"
                 )
+                checkpoints_paths_text = "\n".join(server_config.get("checkpoints_paths", fl.default_checkpoints_paths))
+                checkpoints_paths = gr.Text(label ="Folders where Model Checkpoints are Stored. One Path per Line. First Path is Default Download Path.", value=checkpoints_paths_text,lines=3)
 
                 UI_theme_choice = gr.Dropdown(
                     choices=[
@@ -9214,6 +9303,7 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                 inputs=[
                     state,
                     transformer_types_choices,
+                    model_hierarchy_type_choice,
                     transformer_dtype_policy_choice,
                     text_encoder_quantization_choice,
                     VAE_precision_choice,
@@ -9244,8 +9334,9 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                     image_output_codec_choice,
                     audio_output_codec_choice,
                     resolution,
+                    checkpoints_paths,
                 ],
-                outputs= [msg , header, model_family, model_choice, refresh_form_trigger]
+                outputs= [msg , header, model_family, model_base_type_choice, model_choice, refresh_form_trigger]
         )
 
 def generate_about_tab():
@@ -9303,7 +9394,100 @@ def compact_name(family_name, model_name):
         return model_name[len(family_name):].strip()
     return model_name
 
-def get_sorted_dropdown(dropdown_types, current_model_family):
+
+def create_models_hierarchy(rows):
+    """
+    rows: list of (model_name, model_id, parent_model_id)
+    returns:
+      parents_list: list[(parent_header, parent_id)]
+      children_dict: dict[parent_id] -> list[(child_display_name, child_id)]
+    """
+    toks=lambda s:[t for t in s.split() if t]
+    norm=lambda s:' '.join(s.split()).casefold()
+
+    groups,parents,order=defaultdict(list),{},[]
+    for name,mid,pmid in rows:
+        groups[pmid].append((name,mid))
+        if mid==pmid and pmid not in parents:
+            parents[pmid]=name; order.append(pmid)
+
+    parents_list,children_dict=[],{}
+
+    # --- Real parents ---
+    for pid in order:
+        p_name=parents[pid]; p_tok=toks(p_name); p_low=[w.casefold() for w in p_tok]
+        n=len(p_low); p_last=p_low[-1]; p_set=set(p_low)
+
+        kids=[]
+        for name,mid in groups.get(pid,[]):
+            ot=toks(name); lt=[w.casefold() for w in ot]; st=set(lt)
+            kids.append((name,mid,ot,lt,st))
+
+        outliers={mid for _,mid,_,_,st in kids if mid!=pid and p_set.isdisjoint(st)}
+
+        # Only parent + children that start with parent's first word contribute to prefix
+        prefix_non=[]
+        for name,mid,ot,lt,st in kids:
+            if mid==pid or (mid not in outliers and lt and lt[0]==p_low[0]):
+                prefix_non.append((ot,lt))
+
+        def lcp_len(a,b):
+            i=0; m=min(len(a),len(b))
+            while i<m and a[i]==b[i]: i+=1
+            return i
+        L=n if len(prefix_non)<=1 else min(lcp_len(lt,p_low) for _,lt in prefix_non)
+        if L==0 and len(prefix_non)>1: L=n
+
+        shares_last=any(mid!=pid and mid not in outliers and lt and lt[-1]==p_last
+                        for _,mid,_,lt,_ in kids)
+        header_tokens_disp=p_tok[:L]+([p_tok[-1]] if shares_last and L<n else [])
+        header=' '.join(header_tokens_disp)
+        header_has_last=(L==n) or (shares_last and L<n)
+
+        prefix_low=p_low[:L]
+        def startswith_prefix(lt):
+            if L==0 or len(lt)<L: return False
+            for i in range(L):
+                if lt[i]!=prefix_low[i]: return False
+            return True
+
+        def disp(name,mid,ot,lt):
+            if mid in outliers: return name
+            rem=ot[L:] if startswith_prefix(lt) else ot[:]
+            if header_has_last and lt and lt[-1]==p_last and rem and rem[-1].casefold()==p_last:
+                rem=rem[:-1]
+            s=' '.join(rem).strip()
+            return s if s else 'Default'
+
+        entries=[(disp(p_name,pid,p_tok,p_low),pid)]
+        for name,mid,ot,lt,_ in kids:
+            if mid==pid: continue
+            entries.append((disp(name,mid,ot,lt),mid))
+
+        # Number "Default" for children whose full name == parent's full name
+        p_full=norm(p_name); full_by_mid={mid:name for name,mid,*_ in kids}
+        num=2; numbered=[entries[0]]
+        for dname,mid in entries[1:]:
+            if dname=='Default' and norm(full_by_mid[mid])==p_full:
+                numbered.append((f'Default #{num}',mid)); num+=1
+            else:
+                numbered.append((dname,mid))
+
+        parents_list.append((header,pid))
+        children_dict[pid]=numbered
+
+    # --- Orphan groups (no real parent present) ---
+    for pid in groups.keys():
+        if pid in parents: continue
+        first_name=groups[pid][0][0]
+        parents_list.append((first_name,pid))               # fake parent: full name of first orphan
+        children_dict[pid]=[(name,mid) for name,mid in groups[pid]]  # copy full names only
+    
+    parents_list = sorted(parents_list, key=lambda c: c[0])
+    return parents_list,children_dict
+
+
+def get_sorted_dropdown(dropdown_types, current_model_family, current_model_type, three_levels = True):
     models_families = [get_model_family(type, for_ui= True) for type in dropdown_types] 
     families = {}
     for family in models_families:
@@ -9317,32 +9501,53 @@ def get_sorted_dropdown(dropdown_types, current_model_family):
     else:
         dropdown_choices = [ (families_infos[family][0], compact_name(families_infos[family][1], get_model_name(model_type)), model_type) for model_type, family in zip( dropdown_types, models_families) if family == current_model_family]
     dropdown_choices = sorted(dropdown_choices, key=lambda c: (c[0], c[1]))
-    dropdown_choices = [model[1:] for model in dropdown_choices] 
-    return sorted_familes, dropdown_choices
+    if three_levels:
+        dropdown_choices = [ (*model[1:], get_parent_model_type(model[2])) for model in dropdown_choices] 
+        sorted_choices, finetunes_dict = create_models_hierarchy(dropdown_choices)
+        return sorted_familes, sorted_choices, finetunes_dict[get_parent_model_type(current_model_type)]
+        
+    else:
+        dropdown_types_list = list({get_base_model_type(model[2]) for model in dropdown_choices})
+        dropdown_choices = [model[1:] for model in dropdown_choices] 
+        return sorted_familes, dropdown_types_list, dropdown_choices 
+
+
 
 def generate_dropdown_model_list(current_model_type):
     dropdown_types= transformer_types if len(transformer_types) > 0 else displayed_model_types 
     if current_model_type not in dropdown_types:
         dropdown_types.append(current_model_type)
     current_model_family = get_model_family(current_model_type, for_ui= True)
-    sorted_familes, dropdown_choices = get_sorted_dropdown(dropdown_types, current_model_family)
+    sorted_familes, sorted_models, sorted_finetunes = get_sorted_dropdown(dropdown_types, current_model_family, current_model_type, three_levels=three_levels_hierarchy)
 
     dropdown_families = gr.Dropdown(
         choices= sorted_familes,
         value= current_model_family,
         show_label= False,
-        scale= 1,
+        scale= 2 if three_levels_hierarchy else 1,
         elem_id="family_list",
         min_width=50
         )
 
-    return dropdown_families, gr.Dropdown(
-        choices= dropdown_choices,
+    dropdown_models = gr.Dropdown(
+        choices= sorted_models,
+        value= get_parent_model_type(current_model_type) if three_levels_hierarchy  else get_base_model_type(current_model_type),
+        show_label= False,
+        scale= 3 if len(sorted_finetunes) > 1 else 7, 
+        elem_id="model_base_types_list",
+        visible= three_levels_hierarchy
+        )
+    
+    dropdown_finetunes = gr.Dropdown(
+        choices= sorted_finetunes,
         value= current_model_type,
         show_label= False,
         scale= 4,
+        visible= len(sorted_finetunes) > 1,
         elem_id="model_list",
         )
+    
+    return dropdown_families, dropdown_models, dropdown_finetunes
 
 def change_model_family(state, current_model_family):
     dropdown_types= transformer_types if len(transformer_types) > 0 else displayed_model_types 
@@ -9353,7 +9558,34 @@ def change_model_family(state, current_model_family):
     last_model_per_family = state.get("last_model_per_family", {})
     model_type = last_model_per_family.get(current_model_family, "")
     if len(model_type) == "" or model_type not in [choice[1] for choice in dropdown_choices] :  model_type = dropdown_choices[0][1]
-    return gr.Dropdown(choices= dropdown_choices, value = model_type )
+
+    if three_levels_hierarchy:
+        parent_model_type = get_parent_model_type(model_type)
+        dropdown_choices = [ (*tup, get_parent_model_type(tup[1])) for tup in dropdown_choices] 
+        dropdown_base_types_choices, finetunes_dict = create_models_hierarchy(dropdown_choices)
+        dropdown_choices = finetunes_dict[parent_model_type ]
+        model_finetunes_visible = len(dropdown_choices) > 1 
+    else:
+        parent_model_type = get_base_model_type(model_type)
+        model_finetunes_visible = True
+        dropdown_base_types_choices = list({get_base_model_type(model[1]) for model in dropdown_choices})
+
+    return gr.Dropdown(choices= dropdown_base_types_choices, value = parent_model_type, scale=3 if model_finetunes_visible else 7), gr.Dropdown(choices= dropdown_choices, value = model_type, visible = model_finetunes_visible )
+
+def change_model_base_types(state,  current_model_family, model_base_type_choice):
+    if not three_levels_hierarchy: return gr.update()
+    dropdown_types= transformer_types if len(transformer_types) > 0 else displayed_model_types 
+    current_family_name = families_infos[current_model_family][1]
+    dropdown_choices = [ (compact_name(current_family_name,  get_model_name(model_type)), model_type, model_base_type_choice) for model_type in dropdown_types if get_parent_model_type(model_type) == model_base_type_choice and get_model_family(model_type, for_ui= True) == current_model_family]
+    dropdown_choices = sorted(dropdown_choices, key=lambda c: c[0])
+    _, finetunes_dict = create_models_hierarchy(dropdown_choices)
+    dropdown_choices = finetunes_dict[model_base_type_choice ]
+    model_finetunes_visible = len(dropdown_choices) > 1 
+    last_model_per_type = state.get("last_model_per_type", {})
+    model_type = last_model_per_type.get(model_base_type_choice, "")
+    if len(model_type) == "" or model_type not in [choice[1] for choice in dropdown_choices] :  model_type = dropdown_choices[0][1]
+
+    return gr.update(scale=3 if model_finetunes_visible else 7), gr.Dropdown(choices= dropdown_choices, value = model_type, visible=model_finetunes_visible )
 
 def set_new_tab(tab_state, new_tab_no):
     global vmc_event_handler    
@@ -9519,11 +9751,13 @@ def create_ui():
             --layout-gap: 0px !important;
         }    
         .postprocess span {margin-top:4px;margin-bottom:4px} 
-        #model_list, #family_list{
+        #model_list, #family_list, #model_base_types_list {
         background-color:black;
         padding:1px}
 
-        #model_list input, #family_list input {
+        #model_list,#model_base_types_list { padding-left:0px}
+
+        #model_list input, #family_list input, #model_base_types_list input {
         font-size:25px}
 
         #family_list div div {
@@ -9532,6 +9766,10 @@ def create_ui():
 
         #model_list div div {
         border-radius: 0px 4px 4px 0px;
+        }
+
+        #model_base_types_list div div {
+        border-radius: 0px 0px 0px 0px;
         }
 
         .title-with-lines {
@@ -9889,8 +10127,8 @@ def create_ui():
                         model_family = gr.Dropdown(visible=False, value= "")
                         model_choice = gr.Dropdown(visible=False, value= transformer_type, choices= [transformer_type])
                     else:
-                        gr.Markdown("<div class='title-with-lines'><div class=line width=100%></div></div>")
-                        model_family, model_choice = generate_dropdown_model_list(transformer_type)
+                        gr.Markdown("<div class='title-with-lines'><div class=line width=100%></div></div>")                        
+                        model_family, model_base_type_choice, model_choice = generate_dropdown_model_list(transformer_type)
                         gr.Markdown("<div class='title-with-lines'><div class=line width=100%></div></div>")
                 with gr.Row():
                     header = gr.Markdown(generate_header(transformer_type, compile, attention_mode), visible= True)
@@ -9899,17 +10137,16 @@ def create_ui():
 
                 with gr.Row():
                     (   state, loras_choices, lset_name, resolution, refresh_form_trigger, save_form_trigger
-                        # video_guide, image_guide, video_mask, image_mask, image_refs, 
-                    ) = generate_video_tab(model_family=model_family, model_choice=model_choice, header=header, main = main, main_tabs =main_tabs)
+                    ) = generate_video_tab(model_family=model_family, model_base_type_choice= model_base_type_choice, model_choice=model_choice, header=header, main = main, main_tabs =main_tabs)
             with gr.Tab("Guides", id="info") as info_tab:
                 generate_info_tab()
             with gr.Tab("Video Mask Creator", id="video_mask_creator") as video_mask_creator:
-                matanyone_app.display(main_tabs, tab_state, state, refresh_form_trigger, server_config, get_current_model_settings) #, video_guide, image_guide, video_mask, image_mask, image_refs)
+                matanyone_app.display(main_tabs, tab_state, state, refresh_form_trigger, server_config, get_current_model_settings) 
             if not args.lock_config:
                 with gr.Tab("Downloads", id="downloads") as downloads_tab:
                     generate_download_tab(lset_name, loras_choices, state)
                 with gr.Tab("Configuration", id="configuration") as configuration_tab:
-                    generate_configuration_tab(state, main, header, model_family, model_choice, resolution, refresh_form_trigger)
+                    generate_configuration_tab(state, main, header, model_family, model_base_type_choice, model_choice, resolution, refresh_form_trigger)
             with gr.Tab("About"):
                 generate_about_tab()
         if stats_app is not None:

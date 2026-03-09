@@ -7431,8 +7431,8 @@ def clear_status(state):
 
 def get_latest_status(state, context=""):
     gen = get_gen_info(state)
-    prompt_no = gen["prompt_no"] 
-    prompts_max = gen.get("prompts_max",0)
+    prompt_no = gen.get("prompt_no", 1)
+    prompts_max = gen.get("prompts_max", 1)
     total_generation = gen.get("total_generation", 1)
     repeat_no = gen.get("repeat_no",0)
     total_generation += gen.get("extra_orders", 0)

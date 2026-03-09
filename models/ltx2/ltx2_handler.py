@@ -7,6 +7,9 @@ _GEMMA_FOLDER_URL = "https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/gemm
 _GEMMA_FOLDER = "gemma-3-12b-it-qat-q4_0-unquantized"
 _GEMMA_FILENAME = f"{_GEMMA_FOLDER}.safetensors"
 _GEMMA_QUANTO_FILENAME = f"{_GEMMA_FOLDER}_quanto_bf16_int8.safetensors"
+# GitMylo fp8 text encoder (dev pipeline) - same Gemma 3 12B IT, fp8_e4m3fn format
+_GEMMA_GITMYLO_FP8_FILENAME = "gemma_3_12B_it_fp8_e4m3fn.safetensors"
+_GEMMA_GITMYLO_FP8_URL = "https://huggingface.co/GitMylo/LTX-2-comfy_gemma_fp8_e4m3fn/resolve/main/gemma_3_12B_it_fp8_e4m3fn.safetensors"
 _SPATIAL_UPSCALER_FILENAME = "ltx-2-spatial-upscaler-x2-1.0.safetensors"
 _DISTILLED_LORA_FILENAME = "ltx-2-19b-distilled-lora-384.safetensors"
 _VIDEO_VAE_FILENAME = "ltx-2-19b_vae.safetensors"
@@ -63,12 +66,18 @@ class family_handler:
 
         distilled = pipeline_kind == "distilled"
 
-        extra_model_def = {
-            "text_encoder_folder": _GEMMA_FOLDER,
-            "text_encoder_URLs": [
+        # Dev: GitMylo fp8 text encoder. Distilled: keep DeepBeepMeep (shared tokenizer/config)
+        text_encoder_urls = (
+            [_GEMMA_GITMYLO_FP8_URL]
+            if not distilled
+            else [
                 build_hf_url("DeepBeepMeep/LTX-2", _GEMMA_FOLDER, _GEMMA_FILENAME),
                 build_hf_url("DeepBeepMeep/LTX-2", _GEMMA_FOLDER, _GEMMA_QUANTO_FILENAME),
-            ],
+            ]
+        )
+        extra_model_def = {
+            "text_encoder_folder": _GEMMA_FOLDER,
+            "text_encoder_URLs": text_encoder_urls,
             "dtype": "bf16",
             "fps": 24,
             "frames_minimum": 17,

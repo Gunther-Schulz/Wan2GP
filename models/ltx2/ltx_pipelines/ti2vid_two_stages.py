@@ -341,6 +341,7 @@ class TI2VidTwoStagesPipeline:
                 audio_norm_schedule=parsed_audio_norm,
             )
 
+            print(f"[AdvSampling DEBUG loop] sampler_type={sampler_type!r}, switch_sigma={sampler_switch_sigma!r}, parsed_cfg={parsed_cfg_schedule is not None}, parsed_vnorm={parsed_video_norm is not None}")
             if sampler_type == "dpmpp_sde":
                 sde_kwargs = dict(
                     mask_context=mask_context,

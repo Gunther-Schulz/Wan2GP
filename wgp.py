@@ -6627,9 +6627,6 @@ def generate_video(
                     prefix_video_for_model = prefix_video.float().div_(127.5).sub_(1.0)
                 custom_settings_for_model = custom_settings if isinstance(custom_settings, dict) else {}
                 overridden_inputs = None
-                # DEBUG: trace advanced sampling params from UI to generate()
-                print(f"[AdvSampling DEBUG wgp.py] cfg_schedule={cfg_schedule!r}, custom_sigmas={str(custom_sigmas)[:60]!r}, sampler_type={sampler_type!r}, stg_rescale={stg_rescale!r}")
-                print(f"[AdvSampling DEBUG wgp.py] sigma_easing={sigma_easing!r}, video_norm={video_norm_schedule!r}, audio_norm={audio_norm_schedule!r}, switch_sigma={sampler_switch_sigma!r}")
                 samples = wan_model.generate(
                     input_prompt = prompt,
                     alt_prompt = alt_prompt,

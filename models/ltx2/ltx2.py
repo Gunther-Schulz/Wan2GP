@@ -818,10 +818,6 @@ class LTX2:
         if self._interrupt:
             return None
 
-        # DEBUG: trace advanced sampling params arriving at generate()
-        print(f"[AdvSampling DEBUG ltx2.py] cfg_schedule={cfg_schedule!r}, custom_sigmas={str(custom_sigmas)[:60]!r}, sampler_type={sampler_type!r}")
-        print(f"[AdvSampling DEBUG ltx2.py] remaining kwargs keys={list(kwargs.keys())}")
-
         image_start = _coerce_image_list(image_start)
         image_end = _coerce_image_list(image_end)
         if input_ref_images is None:

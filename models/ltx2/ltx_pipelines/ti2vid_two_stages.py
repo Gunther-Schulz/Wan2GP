@@ -213,30 +213,13 @@ class TI2VidTwoStagesPipeline:
                     channel_dim=-1,
                 )
         audio_cfg_guidance_scale = cfg_guidance_scale if audio_cfg_guidance_scale is None else audio_cfg_guidance_scale
-        if hq_sampler:
-            from ..ltx_core.components.guiders import MultiModalGuider, MultiModalGuiderParams
-            video_guider_params = MultiModalGuiderParams(
-                cfg_scale=cfg_guidance_scale,
-                stg_scale=0.0,
-                rescale_scale=rescale_scale,
-                modality_scale=alt_guidance_scale if alt_guidance_scale != 1.0 else 1.0,
-                stg_blocks=perturbation_layers if perturbation_layers else [],
-            )
-            audio_guider_params = MultiModalGuiderParams(
-                cfg_scale=audio_cfg_guidance_scale,
-                stg_scale=0.0,
-                rescale_scale=rescale_scale,
-                modality_scale=alt_guidance_scale if alt_guidance_scale != 1.0 else 1.0,
-                stg_blocks=perturbation_layers if perturbation_layers else [],
-            )
-        else:
-            guider_cls = CFGGuider
-            if apg_switch:
-                guider_cls = LtxAPGGuider
-            elif cfg_star_switch:
-                guider_cls = CFGStarRescalingGuider
-            video_cfg_guider = guider_cls(cfg_guidance_scale)
-            audio_cfg_guider = guider_cls(audio_cfg_guidance_scale)
+        guider_cls = CFGGuider
+        if apg_switch:
+            guider_cls = LtxAPGGuider
+        elif cfg_star_switch:
+            guider_cls = CFGStarRescalingGuider
+        video_cfg_guider = guider_cls(cfg_guidance_scale)
+        audio_cfg_guider = guider_cls(audio_cfg_guidance_scale)
         dtype = torch.bfloat16
 
         text_encoder = self._get_stage_model(1, "text_encoder")
@@ -298,18 +281,25 @@ class TI2VidTwoStagesPipeline:
             mask_context=None,
         ) -> tuple[LatentState, LatentState]:
             if hq_sampler:
-                video_guider = MultiModalGuider(params=video_guider_params, negative_context=v_context_n)
-                audio_guider = MultiModalGuider(params=audio_guider_params, negative_context=a_context_n)
                 return res2s_audio_video_denoising_loop(
                     sigmas=sigmas,
                     video_state=video_state,
                     audio_state=audio_state,
                     stepper=stepper,
-                    denoise_fn=multi_modal_guider_denoising_func(
-                        video_guider, audio_guider,
-                        v_context_p, a_context_p,
+                    denoise_fn=guider_denoising_func(
+                        video_cfg_guider,
+                        audio_cfg_guider,
+                        v_context_p,
+                        v_context_n,
+                        a_context_p,
+                        a_context_n,
                         transformer=transformer,
-                        v_context_n=v_context_n, a_context_n=a_context_n,
+                        alt_guidance_scale=alt_guidance_scale,
+                        alt_scale=alt_scale,
+                        perturbation_switch=perturbation_switch,
+                        perturbation_layers=perturbation_layers,
+                        perturbation_start=perturbation_start,
+                        perturbation_end=perturbation_end,
                     ),
                     noise_seed=seed,
                     mask_context=mask_context,

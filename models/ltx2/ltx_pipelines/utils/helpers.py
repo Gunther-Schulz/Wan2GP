@@ -451,6 +451,8 @@ def euler_denoising_loop(
     self_refiner_handler=None,
     self_refiner_handler_audio=None,
     self_refiner_generator: torch.Generator | None = None,
+    video_norm_schedule=None,
+    audio_norm_schedule=None,
 ) -> tuple[LatentState | None, LatentState | None]:
     """
     Perform the joint audio-video denoising loop over a diffusion schedule.
@@ -612,6 +614,136 @@ def euler_denoising_loop(
             else:
                 video_state = replace(video_state, latent=stepper.step(video_state.latent, denoised_video, sigmas, step_idx))
                 audio_state = replace(audio_state, latent=stepper.step(audio_state.latent, denoised_audio, sigmas, step_idx))
+
+            # Per-step latent normalization (scaling)
+            if video_norm_schedule is not None:
+                vn = video_norm_schedule.at(step_idx)
+                if vn != 1.0:
+                    video_state = replace(video_state, latent=video_state.latent * vn)
+            if audio_norm_schedule is not None:
+                an = audio_norm_schedule.at(step_idx)
+                if an != 1.0:
+                    audio_state = replace(audio_state, latent=audio_state.latent * an)
+
+            if mask_context is not None:
+                _apply_mask_injection(video_state, sigmas, step_idx, mask_context)
+            _invoke_callback(callback, step_idx, pass_no, video_state, preview_tools)
+
+        return video_state, audio_state
+    finally:
+        if callable(cleanup):
+            cleanup()
+
+
+def dpmpp_sde_denoising_loop(
+    sigmas: torch.Tensor,
+    video_state: LatentState,
+    audio_state: LatentState,
+    denoise_fn: DenoisingFunc,
+    *,
+    mask_context: MaskInjection | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
+    callback: Callable[..., None] | None = None,
+    preview_tools: VideoLatentTools | None = None,
+    pass_no: int = 0,
+    transformer=None,
+    sde_eta: float = 1.0,
+    sde_noise_seed: int = 0,
+    video_norm_schedule=None,
+    audio_norm_schedule=None,
+) -> tuple[LatentState | None, LatentState | None]:
+    """DPM++ SDE denoising loop for joint audio-video generation.
+
+    Unlike the Euler loop this calls ``denoise_fn`` **twice** per step (the
+    DPM++ 2S SDE algorithm).  Does not support the self-refiner — use
+    :func:`euler_denoising_loop` for that.
+    """
+    from shared.utils.sde_stepper import dpmpp_sde_step_1, dpmpp_sde_step_2
+
+    device = video_state.latent.device
+    generator = torch.Generator(device=device).manual_seed(sde_noise_seed)
+
+    prewarm = getattr(denoise_fn, "_prewarm", None)
+    cleanup = getattr(denoise_fn, "_cleanup", None)
+    if callable(prewarm):
+        prewarm(video_state, audio_state, sigmas)
+
+    try:
+        for step_idx, _ in enumerate(tqdm(sigmas[:-1])):
+            if interrupt_check is not None and interrupt_check():
+                return None, None
+
+            if transformer is not None:
+                offload.set_step_no_for_lora(transformer, step_idx)
+
+            sigma = float(sigmas[step_idx])
+            sigma_next = float(sigmas[step_idx + 1])
+
+            # First model evaluation
+            denoised_video, denoised_audio = denoise_fn(video_state, audio_state, sigmas, step_idx)
+            if denoised_video is None or denoised_audio is None:
+                return None, None
+
+            denoised_video = post_process_latent(denoised_video, video_state.denoise_mask, video_state.clean_latent)
+            denoised_audio = post_process_latent(denoised_audio, audio_state.denoise_mask, audio_state.clean_latent)
+
+            # DPM++ SDE step 1: compute midpoint
+            video_mid, sigma_mid = dpmpp_sde_step_1(
+                video_state.latent, denoised_video, sigma, sigma_next,
+                eta=sde_eta, generator=generator,
+            )
+            audio_mid, _ = dpmpp_sde_step_1(
+                audio_state.latent, denoised_audio, sigma, sigma_next,
+                eta=sde_eta, generator=generator,
+            )
+
+            if sigma_mid == 0.0:
+                # Final step handled by step_1 (Euler fallback)
+                video_state = replace(video_state, latent=video_mid)
+                audio_state = replace(audio_state, latent=audio_mid)
+            else:
+                # Second model evaluation at midpoint
+                mid_video_state = replace(video_state, latent=video_mid)
+                mid_audio_state = replace(audio_state, latent=audio_mid)
+
+                # Build midpoint sigmas for the denoise_fn call
+                mid_sigmas = sigmas.clone()
+                mid_sigmas[step_idx] = sigma_mid
+
+                denoised_video_mid, denoised_audio_mid = denoise_fn(
+                    mid_video_state, mid_audio_state, mid_sigmas, step_idx
+                )
+                if denoised_video_mid is None or denoised_audio_mid is None:
+                    return None, None
+
+                denoised_video_mid = post_process_latent(
+                    denoised_video_mid, video_state.denoise_mask, video_state.clean_latent
+                )
+                denoised_audio_mid = post_process_latent(
+                    denoised_audio_mid, audio_state.denoise_mask, audio_state.clean_latent
+                )
+
+                # DPM++ SDE step 2: complete the step
+                video_next = dpmpp_sde_step_2(
+                    video_state.latent, denoised_video, denoised_video_mid,
+                    sigma, sigma_next, eta=sde_eta, generator=generator,
+                )
+                audio_next = dpmpp_sde_step_2(
+                    audio_state.latent, denoised_audio, denoised_audio_mid,
+                    sigma, sigma_next, eta=sde_eta, generator=generator,
+                )
+                video_state = replace(video_state, latent=video_next)
+                audio_state = replace(audio_state, latent=audio_next)
+
+            # Per-step latent normalization
+            if video_norm_schedule is not None:
+                vn = video_norm_schedule.at(step_idx)
+                if vn != 1.0:
+                    video_state = replace(video_state, latent=video_state.latent * vn)
+            if audio_norm_schedule is not None:
+                an = audio_norm_schedule.at(step_idx)
+                if an != 1.0:
+                    audio_state = replace(audio_state, latent=audio_state.latent * an)
 
             if mask_context is not None:
                 _apply_mask_injection(video_state, sigmas, step_idx, mask_context)
@@ -1140,6 +1272,7 @@ def guider_denoising_func(
     perturbation_layers: list[int] | None = None,
     perturbation_start: float = 0.0,
     perturbation_end: float = 1.0,
+    stg_rescale: bool = False,
 ) -> DenoisingFunc:
     perturb_all_layers = perturbation_layers is None
     perturbation_layers_norm = _normalize_perturbation_layers(perturbation_layers)
@@ -1164,6 +1297,10 @@ def guider_denoising_func(
     ) -> tuple[torch.Tensor, torch.Tensor]:
         nonlocal prepared_v_context_n, prepared_a_context_n
         _prewarm(video_state, audio_state, sigmas)
+        if hasattr(video_guider, 'set_step'):
+            video_guider.set_step(step_index)
+        if hasattr(audio_guider, 'set_step'):
+            audio_guider.set_step(step_index)
         sigma = sigmas[step_index]
         pos_video = modality_from_latent_state(
             video_state, prepared_v_context_p, sigma, step_index=step_index, sigma_schedule=sigmas
@@ -1265,9 +1402,19 @@ def guider_denoising_func(
                 stg_denoised_video = denoised_video_list[stg_index]
                 stg_denoised_audio = denoised_audio_list[stg_index]
                 if denoised_video is not None and stg_denoised_video is not None:
-                    denoised_video = denoised_video + (pos_denoised_video - stg_denoised_video)
+                    stg_delta_v = pos_denoised_video - stg_denoised_video
+                    if stg_rescale:
+                        pos_std = pos_denoised_video.std().clamp_min(1e-6)
+                        stg_std = stg_delta_v.std().clamp_min(1e-6)
+                        stg_delta_v = stg_delta_v * (pos_std / stg_std)
+                    denoised_video = denoised_video + stg_delta_v
                 if denoised_audio is not None and stg_denoised_audio is not None:
-                    denoised_audio = denoised_audio + (pos_denoised_audio - stg_denoised_audio)
+                    stg_delta_a = pos_denoised_audio - stg_denoised_audio
+                    if stg_rescale:
+                        pos_std_a = pos_denoised_audio.std().clamp_min(1e-6)
+                        stg_std_a = stg_delta_a.std().clamp_min(1e-6)
+                        stg_delta_a = stg_delta_a * (pos_std_a / stg_std_a)
+                    denoised_audio = denoised_audio + stg_delta_a
 
             if use_alt and alt_index is not None:
                 alt_denoised_video = denoised_video_list[alt_index]

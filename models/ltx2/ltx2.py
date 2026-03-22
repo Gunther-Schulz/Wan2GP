@@ -804,6 +804,15 @@ class LTX2:
         seed: int = 0,
         callback=None,
         VAE_tile_size=None,
+        cfg_schedule: str | None = None,
+        custom_sigmas: str | None = None,
+        sigma_easing: str | None = None,
+        sigma_easing_strength: float = 1.0,
+        sampler_type: str | None = None,
+        sampler_switch_sigma: float | None = None,
+        stg_rescale: bool = False,
+        video_norm_schedule: str | None = None,
+        audio_norm_schedule: str | None = None,
         **kwargs,
     ):
         if self._interrupt:
@@ -1148,6 +1157,15 @@ class LTX2:
                 self_refiner_f_uncertainty=self_refiner_f_uncertainty,
                 self_refiner_certain_percentage=self_refiner_certain_percentage,
                 self_refiner_max_plans=self_refiner_max_plans,
+                cfg_schedule=cfg_schedule,
+                custom_sigmas=custom_sigmas,
+                sigma_easing=sigma_easing,
+                sigma_easing_strength=sigma_easing_strength,
+                sampler_type=sampler_type,
+                sampler_switch_sigma=sampler_switch_sigma,
+                stg_rescale=stg_rescale,
+                video_norm_schedule=video_norm_schedule,
+                audio_norm_schedule=audio_norm_schedule,
             )
         else:
             pipeline_output = self.pipeline(

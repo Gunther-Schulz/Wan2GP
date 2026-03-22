@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -187,6 +187,31 @@ class LegacyStatefulAPGGuider(GuiderProtocol):
 
     def enabled(self) -> bool:
         return self.scale != 0.0
+
+
+@dataclass(frozen=False)
+class ScheduledGuider(GuiderProtocol):
+    """Wraps any GuiderProtocol subclass with per-step scale scheduling.
+
+    Call :meth:`set_step` before each denoising step to update the scale from
+    the schedule.  Guiders without a schedule (vanilla path) never see
+    ``set_step`` so behaviour is unchanged.
+    """
+
+    _base_cls: type
+    _schedule: object  # StepSchedule — kept untyped to avoid circular import
+    scale: float = 1.0
+    _base_kwargs: dict = field(default_factory=dict)
+
+    def set_step(self, step_idx: int) -> None:
+        self.scale = self._schedule.at(step_idx)
+
+    def delta(self, cond: torch.Tensor, uncond: torch.Tensor) -> torch.Tensor:
+        base = self._base_cls(scale=self.scale, **self._base_kwargs)
+        return base.delta(cond, uncond)
+
+    def enabled(self) -> bool:
+        return True
 
 
 def projection_coef(to_project: torch.Tensor, project_onto: torch.Tensor) -> torch.Tensor:

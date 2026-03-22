@@ -27,6 +27,7 @@ from .utils.helpers import (
     bind_interrupt_check,
     cleanup_memory,
     denoise_audio_video,
+    dpmpp_sde_denoising_loop,
     euler_denoising_loop,
     generate_enhanced_prompt,
     get_device,
@@ -160,6 +161,15 @@ class TI2VidTwoStagesPipeline:
         self_refiner_f_uncertainty: float = 0.1,
         self_refiner_certain_percentage: float = 0.999,
         self_refiner_max_plans: int = 1,
+        cfg_schedule: str | None = None,
+        custom_sigmas: str | None = None,
+        sigma_easing: str | None = None,
+        sigma_easing_strength: float = 1.0,
+        sampler_type: str | None = None,
+        sampler_switch_sigma: float | None = None,
+        stg_rescale: bool = False,
+        video_norm_schedule: str | None = None,
+        audio_norm_schedule: str | None = None,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
         assert_resolution(height=height, width=width, is_two_stage=True)
 
@@ -167,6 +177,11 @@ class TI2VidTwoStagesPipeline:
         mask_generator = torch.Generator(device=self.device).manual_seed(int(seed) + 1)
         noiser = GaussianNoiser(generator=generator)
         stepper = EulerDiffusionStep()
+        if sampler_type == "euler_ancestral":
+            from shared.utils.sde_stepper import EulerAncestralStep
+            stepper = EulerAncestralStep(
+                generator=torch.Generator(device=self.device).manual_seed(seed + 2),
+            )
         self_refiner_handler = None
         self_refiner_handler_audio = None
         self_refiner_handler_stage2 = None
@@ -210,8 +225,20 @@ class TI2VidTwoStagesPipeline:
             guider_cls = LtxAPGGuider
         elif cfg_star_switch:
             guider_cls = CFGStarRescalingGuider
-        video_cfg_guider = guider_cls(cfg_guidance_scale)
-        audio_cfg_guider = guider_cls(audio_cfg_guidance_scale)
+
+        # Parse step schedules
+        from shared.utils.step_schedule import StepSchedule
+        parsed_cfg_schedule = StepSchedule.parse(cfg_schedule)
+        parsed_video_norm = StepSchedule.parse(video_norm_schedule)
+        parsed_audio_norm = StepSchedule.parse(audio_norm_schedule)
+
+        if parsed_cfg_schedule is not None:
+            from ..ltx_core.components.guiders import ScheduledGuider
+            video_cfg_guider = ScheduledGuider(_base_cls=guider_cls, _schedule=parsed_cfg_schedule)
+            audio_cfg_guider = ScheduledGuider(_base_cls=guider_cls, _schedule=parsed_cfg_schedule)
+        else:
+            video_cfg_guider = guider_cls(cfg_guidance_scale)
+            audio_cfg_guider = guider_cls(audio_cfg_guidance_scale)
         dtype = torch.bfloat16
 
         text_encoder = self._get_stage_model(1, "text_encoder")
@@ -250,7 +277,17 @@ class TI2VidTwoStagesPipeline:
         video_encoder = self._get_stage_model(1, "video_encoder")
         transformer = self._get_stage_model(1, "transformer")
         bind_interrupt_check(transformer, interrupt_check)
-        sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
+        if custom_sigmas is not None:
+            from shared.utils.sigma_utils import parse_custom_sigmas, apply_sigma_easing
+            parsed = parse_custom_sigmas(custom_sigmas)
+            if parsed is not None:
+                if sigma_easing:
+                    parsed = apply_sigma_easing(parsed, sigma_easing, sigma_easing_strength)
+                sigmas = torch.tensor(parsed, dtype=torch.float32, device=self.device)
+            else:
+                sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
+        else:
+            sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
         if loras_slists is not None:
             stage_1_steps = len(sigmas) - 1
             update_loras_slists(
@@ -272,26 +309,23 @@ class TI2VidTwoStagesPipeline:
             preview_tools: VideoLatentTools | None = None,
             mask_context=None,
         ) -> tuple[LatentState, LatentState]:
-            return euler_denoising_loop(
-                sigmas=sigmas,
-                video_state=video_state,
-                audio_state=audio_state,
-                stepper=stepper,
-                denoise_fn=guider_denoising_func(
-                    video_cfg_guider,
-                    audio_cfg_guider,
-                    v_context_p,
-                    v_context_n,
-                    a_context_p,
-                    a_context_n,
-                    transformer=transformer,  # noqa: F821
-                    alt_guidance_scale=alt_guidance_scale,
-                    alt_scale=alt_scale,
-                    perturbation_switch=perturbation_switch,
-                    perturbation_layers=perturbation_layers,
-                    perturbation_start=perturbation_start,
-                    perturbation_end=perturbation_end,
-                ),
+            denoise_fn = guider_denoising_func(
+                video_cfg_guider,
+                audio_cfg_guider,
+                v_context_p,
+                v_context_n,
+                a_context_p,
+                a_context_n,
+                transformer=transformer,  # noqa: F821
+                alt_guidance_scale=alt_guidance_scale,
+                alt_scale=alt_scale,
+                perturbation_switch=perturbation_switch,
+                perturbation_layers=perturbation_layers,
+                perturbation_start=perturbation_start,
+                perturbation_end=perturbation_end,
+                stg_rescale=stg_rescale,
+            )
+            euler_kwargs = dict(
                 mask_context=mask_context,
                 interrupt_check=interrupt_check,
                 callback=callback,
@@ -301,7 +335,48 @@ class TI2VidTwoStagesPipeline:
                 self_refiner_handler=self_refiner_handler,
                 self_refiner_handler_audio=self_refiner_handler_audio,
                 self_refiner_generator=generator,
+                video_norm_schedule=parsed_video_norm,
+                audio_norm_schedule=parsed_audio_norm,
             )
+
+            if sampler_type == "dpmpp_sde":
+                sde_kwargs = dict(
+                    mask_context=mask_context,
+                    interrupt_check=interrupt_check,
+                    callback=callback,
+                    preview_tools=preview_tools,
+                    pass_no=1,
+                    transformer=transformer,
+                    sde_eta=1.0,
+                    sde_noise_seed=seed + 3,
+                    video_norm_schedule=parsed_video_norm,
+                    audio_norm_schedule=parsed_audio_norm,
+                )
+                if sampler_switch_sigma and sampler_switch_sigma > 0:
+                    # Split sampling: SDE for high noise, Euler for low noise
+                    split_idx = len(sigmas) - 1
+                    for i, s in enumerate(sigmas):
+                        if float(s) < sampler_switch_sigma:
+                            split_idx = i
+                            break
+                    sde_sigmas = sigmas[:split_idx + 1]
+                    euler_sigmas = sigmas[split_idx:]
+                    video_state, audio_state = dpmpp_sde_denoising_loop(
+                        sde_sigmas, video_state, audio_state, denoise_fn, **sde_kwargs,
+                    )
+                    if video_state is None or audio_state is None:
+                        return video_state, audio_state
+                    return euler_denoising_loop(
+                        euler_sigmas, video_state, audio_state, stepper, denoise_fn, **euler_kwargs,
+                    )
+                else:
+                    return dpmpp_sde_denoising_loop(
+                        sigmas, video_state, audio_state, denoise_fn, **sde_kwargs,
+                    )
+            else:
+                return euler_denoising_loop(
+                    sigmas, video_state, audio_state, stepper, denoise_fn, **euler_kwargs,
+                )
 
         stage_1_output_shape = VideoPixelShape(
             batch=1,

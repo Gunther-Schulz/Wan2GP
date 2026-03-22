@@ -277,6 +277,7 @@ class TI2VidTwoStagesPipeline:
         video_encoder = self._get_stage_model(1, "video_encoder")
         transformer = self._get_stage_model(1, "transformer")
         bind_interrupt_check(transformer, interrupt_check)
+        print(f"[AdvSampling DEBUG] custom_sigmas={custom_sigmas!r}, sampler_type={sampler_type!r}, cfg_schedule={cfg_schedule!r}, stg_rescale={stg_rescale!r}")
         if custom_sigmas is not None:
             from shared.utils.sigma_utils import parse_custom_sigmas, apply_sigma_easing
             parsed = parse_custom_sigmas(custom_sigmas)
@@ -288,6 +289,7 @@ class TI2VidTwoStagesPipeline:
                 sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
         else:
             sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
+        print(f"[AdvSampling DEBUG] Using {len(sigmas)-1} steps, sigmas={sigmas.tolist()[:5]}...")
         if loras_slists is not None:
             stage_1_steps = len(sigmas) - 1
             update_loras_slists(

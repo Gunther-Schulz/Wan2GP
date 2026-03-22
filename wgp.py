@@ -10700,19 +10700,23 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
 
                         with gr.Column(visible=model_def.get("advanced_sampling", False)) as advanced_sampling_col:
                             gr.Markdown("<B>Advanced Sampling (fine-grained control over the denoising process)</B>")
-                            cfg_schedule = gr.Textbox(value=ui_get("cfg_schedule", ""), label="Per-step CFG Schedule", placeholder="3,2,1,1,1,1,1,1", info="Comma-separated CFG values per step (overrides Guidance slider)")
-                            with gr.Row():
-                                custom_sigmas = gr.Textbox(value=ui_get("custom_sigmas", ""), label="Custom Sigma Schedule", placeholder="1.0,0.99,...,0.0", info="Comma-separated sigma values (overrides Steps slider)", scale=3)
-                            with gr.Row():
-                                sigma_easing = gr.Dropdown(choices=[("None", ""), ("Linear", "linear"), ("Cubic", "cubic"), ("Cubic In/Out", "cubic_in_out")], value=ui_get("sigma_easing", ""), label="Sigma Easing", scale=1)
-                                sigma_easing_strength = gr.Slider(0, 2, value=ui_get("sigma_easing_strength", 1.0), step=0.1, label="Easing Strength", scale=1, show_reset_button=False)
-                            with gr.Row():
-                                sampler_type = gr.Dropdown(choices=[("Default (Euler)", ""), ("DPM++ SDE", "dpmpp_sde"), ("Euler Ancestral", "euler_ancestral")], value=ui_get("sampler_type", ""), label="Sampler", scale=1)
-                                sampler_switch_sigma = gr.Slider(0, 1, value=ui_get("sampler_switch_sigma", 0), step=0.05, label="Sampler Switch Sigma", info="Switch to Euler below this sigma (0 = no switch)", scale=1, show_reset_button=False)
-                            stg_rescale = gr.Checkbox(value=ui_get("stg_rescale", False), label="STG Rescale (normalize STG guidance delta)", visible=model_def.get("perturbation", False))
-                            with gr.Row():
-                                video_norm_schedule = gr.Textbox(value=ui_get("video_norm_schedule", ""), label="Video Normalization Schedule", placeholder="1,1,1,...", info="Per-step video latent scaling")
-                                audio_norm_schedule = gr.Textbox(value=ui_get("audio_norm_schedule", ""), label="Audio Normalization Schedule", placeholder="0.9,0.9,1,1,...", info="Per-step audio latent scaling")
+                            _adv_sampling_toggle = gr.Dropdown(choices=[("Disabled", 0), ("Enabled", 1)], value=ui_get("_adv_sampling_toggle", 0), label="Advanced Sampling", scale=1)
+                            with gr.Column(visible=(update_form and ui_get("_adv_sampling_toggle", 0) == 1)) as _adv_sampling_controls:
+                                cfg_schedule = gr.Textbox(value=ui_get("cfg_schedule", ""), label="Per-step CFG Schedule", placeholder="3,2,1,1,1,1,1,1", info="Comma-separated CFG values per step (overrides Guidance slider)")
+                                with gr.Row():
+                                    custom_sigmas = gr.Textbox(value=ui_get("custom_sigmas", ""), label="Custom Sigma Schedule", placeholder="1.0,0.99,...,0.0", info="Comma-separated sigma values (overrides Steps slider)", scale=3)
+                                with gr.Row():
+                                    sigma_easing = gr.Dropdown(choices=[("None", ""), ("Linear", "linear"), ("Cubic", "cubic"), ("Cubic In/Out", "cubic_in_out")], value=ui_get("sigma_easing", ""), label="Sigma Easing", scale=1)
+                                    sigma_easing_strength = gr.Slider(0, 2, value=ui_get("sigma_easing_strength", 1.0), step=0.1, label="Easing Strength", scale=1, show_reset_button=False)
+                                with gr.Row():
+                                    sampler_type = gr.Dropdown(choices=[("Default (Euler)", ""), ("DPM++ SDE", "dpmpp_sde"), ("Euler Ancestral", "euler_ancestral")], value=ui_get("sampler_type", ""), label="Sampler", scale=1)
+                                    sampler_switch_sigma = gr.Slider(0, 1, value=ui_get("sampler_switch_sigma", 0), step=0.05, label="Sampler Switch Sigma", info="Switch to Euler below this sigma (0 = no switch)", scale=1, show_reset_button=False)
+                                stg_rescale = gr.Checkbox(value=ui_get("stg_rescale", False), label="STG Rescale (normalize STG guidance delta)", visible=model_def.get("perturbation", False))
+                                with gr.Row():
+                                    video_norm_schedule = gr.Textbox(value=ui_get("video_norm_schedule", ""), label="Video Normalization Schedule", placeholder="1,1,1,...", info="Per-step video latent scaling")
+                                    audio_norm_schedule = gr.Textbox(value=ui_get("audio_norm_schedule", ""), label="Audio Normalization Schedule", placeholder="0.9,0.9,1,1,...", info="Per-step audio latent scaling")
+                            if not update_form:
+                                _adv_sampling_toggle.change(fn=lambda v: gr.update(visible=v == 1), inputs=[_adv_sampling_toggle], outputs=[_adv_sampling_controls])
 
                 with gr.Tab("Sliding Window", visible= sliding_window_enabled and not image_outputs and not audio_only) as sliding_window_tab:
 

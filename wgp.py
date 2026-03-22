@@ -10657,7 +10657,11 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                                 
                                 if not update_form:
                                     refiner_add_btn.click(fn=add_refiner_rule, inputs=[self_refiner_plan, refiner_range, refiner_mult], outputs=[self_refiner_plan])
-                                    self_refiner_setting.change(fn=lambda s: gr.update(visible=s > 0), inputs=[self_refiner_setting], outputs=[self_refiner_rules_ui])
+                                    # Re-emit self_refiner_plan on visibility change to force @gr.render to
+                                    # display pre-existing rules that were loaded before the column was visible.
+                                    def _show_rules_ui_and_refresh(setting, plan):
+                                        return gr.update(visible=setting > 0), list(plan) if plan else []
+                                    self_refiner_setting.change(fn=_show_rules_ui_and_refresh, inputs=[self_refiner_setting, self_refiner_plan], outputs=[self_refiner_rules_ui, self_refiner_plan])
 
                                     @gr.render(inputs=self_refiner_plan)
                                     def render_refiner_rules(rules):

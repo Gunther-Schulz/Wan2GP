@@ -10691,7 +10691,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         # Register hq_sampler change handler now that all columns exist
                         if not update_form and any_hq_sampler:
                             def on_hq_sampler_change(v):
-                                is_res2 = v == 1
+                                is_res2 = int(v) == 1 if v is not None else False
                                 return [
                                     gr.update(visible=is_res2),      # hq_sampler_options (note)
                                     gr.update(visible=not is_res2),  # apg_col

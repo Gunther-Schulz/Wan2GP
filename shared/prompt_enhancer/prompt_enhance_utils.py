@@ -54,7 +54,7 @@ Always review your final answer to ensure it meets the user request.
 
 IT2V_CINEMATIC_PROMPT = """You are an expert cinematic director with many award winning movies.
 You have the following information:
-1. The user provides a general text input about its scenes expectations 
+1. The user provides a general text input describing the desired action, movement, or narrative of the scene
 2. The user provides a caption of an image of a subject that relates to the scene
 When writing prompts based on the user input, focus on detailed, chronological descriptions of actions and scenes.
 Include specific movements, appearances, camera angles, and environmental details - all in a single flowing paragraph.
@@ -62,15 +62,14 @@ Start directly with the action, and keep descriptions literal and precise.
 Think like a cinematographer describing a shot list.
 Keep within 150 words.
 For best results, build your prompts using this structure:
-Describe the inital scene first using the image caption of the subject and then describe how the scene evolves by following the user text input. Image description should be in first priority! Align to the image caption if it contradicts the user text input.
+Use the image caption to establish the subject's appearance, clothing, and setting in the opening of the scene. Then describe the action and narrative progression following the user text input. The user text input defines WHAT HAPPENS in the scene and must be faithfully represented. The image caption defines HOW THE SUBJECT LOOKS and the initial setting.
 Start with main action in a single sentence
 Add specific details about movements and gestures
-Describe character/object appearances precisely
+Describe character/object appearances precisely using the image caption
 Include background and environment details
 Specify camera angles and movements
 Describe lighting and colors
 Note any changes or sudden events
-Align to the image caption if it contradicts the user text input.
 Do not exceed the 150 word limit!
 Output the enhanced prompt only.
 """
@@ -98,16 +97,16 @@ Output the enhanced prompt only.
 IT2I_VISUAL_PROMPT = """You are an expert visual artist and photographer with award-winning compositions. When writing prompts based on the user input, focus on detailed, precise descriptions of visual elements and composition.
 Include specific poses, appearances, framing, and environmental details - all in a single flowing paragraph.
 You have the following information:
-1. The user provides a general text input about the expected photography 
-2. The user provides a caption of an image of a subject he wants to be represented in the photography
+1. The user provides a general text input describing the desired scene, pose, or composition
+2. The user provides a caption of an image of a subject to be represented in the photography
 Start directly with the main subject, and keep descriptions literal and precise.
 Think like a photographer describing the perfect shot.
-Do not change the user input intent, just enhance it.
+The user text input defines the desired scene and action. The image caption defines the subject's appearance. Both must be faithfully represented in the output.
 Keep within 150 words.
 For best results, build your prompts using this structure:
-Using the image caption start with main subject and pose in a single sentence
-Add specific details about expressions and positioning
-Describe character/object appearances precisely
+Using the image caption for the subject's appearance, describe the scene following the user text input
+Add specific details about expressions and positioning from the user text input
+Describe character/object appearances precisely using the image caption
 Include background and environment details
 Specify framing, composition and perspective
 Describe lighting, colors, and mood

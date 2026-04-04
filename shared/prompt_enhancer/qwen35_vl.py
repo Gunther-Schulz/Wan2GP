@@ -681,7 +681,7 @@ def _prepare_multimodal_vllm_prompt(self, model_inputs):
 
 
 def _generate_image_captions_vllm(self, images):
-    logger.info("[PE-DEBUG] _generate_image_captions_vllm (Qwen VL vLLM path): num_images=%d", len(images))
+    print("[PE-DEBUG] _generate_image_captions_vllm (Qwen VL vLLM path): num_images=%d" % (len(images),))
     qwen35_text_mod = _get_qwen35_text_runtime_helpers()
     text_model = self._prompt_enhancer_text_model
     tokenizer = self._prompt_enhancer_tokenizer
@@ -741,16 +741,15 @@ def _generate_image_captions_vllm(self, images):
             position_offset=position_offset,
         )
         caption = _clean_generated_text("" if response is None else response.get("text", ""))
-        logger.info("[PE-DEBUG] _generate_image_captions_vllm: caption=%r", caption[:200] if caption else caption)
+        print("[PE-DEBUG] _generate_image_captions_vllm: caption=%r" % (caption[:200] if caption else caption,))
         outputs.append(caption)
         reset_context()
-    logger.info("[PE-DEBUG] _generate_image_captions_vllm: all captions=%r", [c[:200] if c else None for c in outputs])
+    print("[PE-DEBUG] _generate_image_captions_vllm: all captions=%r" % ([c[:200] if c else None for c in outputs],))
     return outputs
 
 
 def _generate_image_captions(self, images):
-    logger.info("[PE-DEBUG] _generate_image_captions (Qwen VL): num_images=%d, using_vllm=%r",
-                len(images), _get_qwen35_text_runtime_helpers()._use_vllm_prompt_enhancer(self._prompt_enhancer_text_model))
+    print("[PE-DEBUG] _generate_image_captions (Qwen VL): num_images=%d, using_vllm=%r" % (len(images), _get_qwen35_text_runtime_helpers()._use_vllm_prompt_enhancer(self._prompt_enhancer_text_model),))
     if _get_qwen35_text_runtime_helpers()._use_vllm_prompt_enhancer(self._prompt_enhancer_text_model):
         return _generate_image_captions_vllm(self, images)
     outputs = []
@@ -793,9 +792,9 @@ def _generate_image_captions(self, images):
             seed=None,
             progress_desc="Qwen3.5 image description tokens",
         )
-        logger.info("[PE-DEBUG] _generate_image_captions (Qwen VL non-vllm): decoded=%r", [d[:200] if d else None for d in decoded])
+        print("[PE-DEBUG] _generate_image_captions (Qwen VL non-vllm): decoded=%r" % ([d[:200] if d else None for d in decoded],))
         outputs.extend(decoded)
-    logger.info("[PE-DEBUG] _generate_image_captions (Qwen VL non-vllm): all captions=%r", [c[:200] if c else None for c in outputs])
+    print("[PE-DEBUG] _generate_image_captions (Qwen VL non-vllm): all captions=%r" % ([c[:200] if c else None for c in outputs],))
     return outputs
 
 

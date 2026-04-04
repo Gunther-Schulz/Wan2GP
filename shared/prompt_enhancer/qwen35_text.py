@@ -583,14 +583,12 @@ def _generate_messages_vllm(
         else f"Qwen3.5 prompt enhancement ({getattr(self, '_prompt_enhancer_engine_name', 'vllm')})"
     )
     for idx, message in enumerate(tqdm(messages, total=len(messages), desc=progress_desc, dynamic_ncols=True, leave=False)):
-        logger.info("[PE-DEBUG] _generate_messages_vllm: message[%d] roles=%r, system_len=%d, user_len=%d",
-                    idx, [m["role"] for m in message],
+        print("[PE-DEBUG] _generate_messages_vllm: message[%d] roles=%r, system_len=%d, user_len=%d" % (idx, [m["role"] for m in message],
                     len(message[0]["content"]) if len(message) > 0 else 0,
-                    len(message[1]["content"]) if len(message) > 1 else 0)
-        logger.info("[PE-DEBUG] _generate_messages_vllm: message[%d] user_content=%r",
-                    idx, message[1]["content"][:500] if len(message) > 1 else "N/A")
+                    len(message[1]["content"]) if len(message) > 1 else 0,))
+        print("[PE-DEBUG] _generate_messages_vllm: message[%d] user_content=%r" % (idx, message[1]["content"][:500] if len(message) > 1 else "N/A",))
         prompt = _build_chat_prompt(tokenizer, message, enable_thinking=thinking_enabled)
-        logger.info("[PE-DEBUG] _generate_messages_vllm: final prompt (first 800 chars)=%r", prompt[:800])
+        print("[PE-DEBUG] _generate_messages_vllm: final prompt (first 800 chars)=%r" % (prompt[:800],))
         try:
             prompt_len = len(tokenizer.encode(prompt))
         except Exception:
@@ -645,7 +643,7 @@ def _generate_messages_vllm(
             except Exception:
                 raw_text = text
         thinking_text, answer_text = _split_generated_text(raw_text)
-        logger.info("[PE-DEBUG] _generate_messages_vllm: output[%d] answer_text=%r", idx, answer_text[:300] if answer_text else None)
+        print("[PE-DEBUG] _generate_messages_vllm: output[%d] answer_text=%r" % (idx, answer_text[:300] if answer_text else None,))
         if thinking_enabled:
             _print_thinking_process(idx, len(messages), thinking_text)
         outputs.append(answer_text)

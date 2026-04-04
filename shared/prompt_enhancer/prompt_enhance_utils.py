@@ -189,25 +189,24 @@ def _merge_prompt_enhancer_system_prompt(prompt_enhancer_model, system_prompt: s
 
 def _format_prompt_enhancer_user_content(prompt_enhancer_model, prompt: str, image_caption: Optional[str] = None, thinking_enabled: Optional[bool] = None) -> str:
     prompt, _system_suffix, _replace_system_prompt = _split_prompt_enhancer_system_suffix(prompt_enhancer_model, prompt)
-    logger.info("[PE-DEBUG] _format_prompt_enhancer_user_content: prompt=%r, has_image_caption=%r, thinking=%r",
-                prompt[:200] if prompt else prompt, image_caption is not None, thinking_enabled)
+    print("[PE-DEBUG] _format_prompt_enhancer_user_content: prompt=%r, has_image_caption=%r, thinking=%r" % (prompt[:200] if prompt else prompt, image_caption is not None, thinking_enabled,))
     if not _use_qwen35_thinking_prompt(prompt_enhancer_model, thinking_enabled=thinking_enabled):
         if image_caption is None:
             result = f"user_prompt: {prompt}"
         else:
             result = f"user_prompt: {prompt}\nimage_caption: {image_caption}"
-        logger.info("[PE-DEBUG] _format_prompt_enhancer_user_content (non-thinking) result=%r", result[:500])
+        print("[PE-DEBUG] _format_prompt_enhancer_user_content (non-thinking) result=%r" % (result[:500],))
         return result
     if image_caption is None:
-        logger.info("[PE-DEBUG] _format_prompt_enhancer_user_content (thinking, no caption): returning prompt only")
+        print("[PE-DEBUG] _format_prompt_enhancer_user_content (thinking, no caption): returning prompt only")
         return prompt
     image_caption = str(image_caption or "").strip()
     if len(prompt) == 0:
         result = f"image_caption:\n{image_caption}"
-        logger.info("[PE-DEBUG] _format_prompt_enhancer_user_content (thinking, EMPTY prompt): result=%r", result[:500])
+        print("[PE-DEBUG] _format_prompt_enhancer_user_content (thinking, EMPTY prompt): result=%r" % (result[:500],))
         return result
     result = f"{prompt}\n\nimage_caption:\n{image_caption}"
-    logger.info("[PE-DEBUG] _format_prompt_enhancer_user_content (thinking, prompt+caption): result=%r", result[:500])
+    print("[PE-DEBUG] _format_prompt_enhancer_user_content (thinking, prompt+caption): result=%r" % (result[:500],))
     return result
 
 
@@ -231,13 +230,12 @@ def generate_cinematic_prompt(
     thinking_enabled: Optional[bool] = None,
 ) -> List[str]:
     prompts = [prompt] if isinstance(prompt, str) else prompt
-    logger.info("[PE-DEBUG] generate_cinematic_prompt: prompts=%r, has_images=%r, video_prompt=%r, text_prompt=%r",
-                prompts, images is not None, video_prompt, text_prompt)
+    print("[PE-DEBUG] generate_cinematic_prompt: prompts=%r, has_images=%r, video_prompt=%r, text_prompt=%r" % (prompts, images is not None, video_prompt, text_prompt,))
 
     if images is None:
         if prompt_enhancer_instructions is None:
             prompt_enhancer_instructions = T2T_TEXT_PROMPT if text_prompt else (T2V_CINEMATIC_PROMPT if video_prompt else T2I_VISUAL_PROMPT)
-        logger.info("[PE-DEBUG] generate_cinematic_prompt: taking TEXT-ONLY path (no images)")
+        print("[PE-DEBUG] generate_cinematic_prompt: taking TEXT-ONLY path (no images)")
         prompts = _generate_t2v_prompt(
             prompt_enhancer_model,
             prompt_enhancer_tokenizer,
@@ -254,8 +252,7 @@ def generate_cinematic_prompt(
     else:
         if prompt_enhancer_instructions is None:
             prompt_enhancer_instructions = IT2V_CINEMATIC_PROMPT if video_prompt else IT2I_VISUAL_PROMPT
-        logger.info("[PE-DEBUG] generate_cinematic_prompt: taking IMAGE+TEXT path, num_images=%d, system_prompt_type=%s",
-                    len(images), "IT2V" if video_prompt else "IT2I")
+        print("[PE-DEBUG] generate_cinematic_prompt: taking IMAGE+TEXT path, num_images=%d, system_prompt_type=%s" % (len(images), "IT2V" if video_prompt else "IT2I",))
 
         prompts = _generate_i2v_prompt(
             image_caption_model,
@@ -368,17 +365,16 @@ def _generate_i2v_prompt(
     post_image_caption_hook = None,
     thinking_enabled: Optional[bool] = None,
 ) -> List[str]:
-    logger.info("[PE-DEBUG] _generate_i2v_prompt: prompts=%r, num_images=%d, has_generate_image_captions=%r",
-                prompts, len(first_frames), hasattr(image_caption_model, "generate_image_captions"))
+    print("[PE-DEBUG] _generate_i2v_prompt: prompts=%r, num_images=%d, has_generate_image_captions=%r" % (prompts, len(first_frames), hasattr(image_caption_model, "generate_image_captions"),))
     if hasattr(image_caption_model, "generate_image_captions"):
-        logger.info("[PE-DEBUG] _generate_i2v_prompt: using model.generate_image_captions (Qwen VL path)")
+        print("[PE-DEBUG] _generate_i2v_prompt: using model.generate_image_captions (Qwen VL path)")
         image_captions = image_caption_model.generate_image_captions(first_frames)
     else:
-        logger.info("[PE-DEBUG] _generate_i2v_prompt: using _generate_image_captions (Florence2 path)")
+        print("[PE-DEBUG] _generate_i2v_prompt: using _generate_image_captions (Florence2 path)")
         image_captions = _generate_image_captions(
             image_caption_model, image_caption_processor, first_frames
         )
-    logger.info("[PE-DEBUG] _generate_i2v_prompt: image_captions=%r", [c[:200] if c else None for c in image_captions])
+    print("[PE-DEBUG] _generate_i2v_prompt: image_captions=%r" % ([c[:200] if c else None for c in image_captions],))
     if callable(post_image_caption_hook):
         if bool(getattr(prompt_enhancer_model, "_prompt_enhancer_use_vllm", False)):
             unload_runtime = getattr(prompt_enhancer_model, "unload", None)
@@ -390,12 +386,11 @@ def _generate_i2v_prompt(
     messages = []
     for prompt, image_caption in zip(prompts, image_captions):
         prompt_body, system_suffix, replace_system_prompt = _split_prompt_enhancer_system_suffix(prompt_enhancer_model, prompt)
-        logger.info("[PE-DEBUG] _generate_i2v_prompt message build: prompt_body=%r, system_suffix=%r, replace_system_prompt=%r",
-                    prompt_body[:200] if prompt_body else None, system_suffix[:100] if system_suffix else None, replace_system_prompt)
+        print("[PE-DEBUG] _generate_i2v_prompt message build: prompt_body=%r, system_suffix=%r, replace_system_prompt=%r" % (prompt_body[:200] if prompt_body else None, system_suffix[:100] if system_suffix else None, replace_system_prompt,))
         message_system_prompt = _merge_prompt_enhancer_system_prompt(prompt_enhancer_model, system_prompt, system_suffix, replace_system_prompt, thinking_enabled=thinking_enabled)
         user_content = _format_prompt_enhancer_user_content(prompt_enhancer_model, prompt_body, image_caption=image_caption, thinking_enabled=thinking_enabled)
-        logger.info("[PE-DEBUG] _generate_i2v_prompt: system_prompt (first 300 chars)=%r", message_system_prompt[:300] if message_system_prompt else None)
-        logger.info("[PE-DEBUG] _generate_i2v_prompt: user_content=%r", user_content[:500] if user_content else None)
+        print("[PE-DEBUG] _generate_i2v_prompt: system_prompt (first 300 chars)=%r" % (message_system_prompt[:300] if message_system_prompt else None,))
+        print("[PE-DEBUG] _generate_i2v_prompt: user_content=%r" % (user_content[:500] if user_content else None,))
         messages.append(
             [
                 {"role": "system", "content": message_system_prompt},
@@ -450,8 +445,7 @@ def _generate_image_captions(
     images: List[Image.Image],
     system_prompt: str = "<DETAILED_CAPTION>",
 ) -> List[str]:
-    logger.info("[PE-DEBUG] _generate_image_captions (Florence2): num_images=%d, model_type=%s",
-                len(images), type(image_caption_model).__name__)
+    print("[PE-DEBUG] _generate_image_captions (Florence2): num_images=%d, model_type=%s" % (len(images), type(image_caption_model).__name__,))
     image_caption_prompts = [system_prompt] * len(images)
     inputs = image_caption_processor(
         image_caption_prompts, images, return_tensors="pt"
@@ -473,7 +467,7 @@ def _generate_image_captions(
         )
 
     captions = image_caption_processor.batch_decode(generated_ids, skip_special_tokens=True)
-    logger.info("[PE-DEBUG] _generate_image_captions (Florence2) result: %r", [c[:200] if c else None for c in captions])
+    print("[PE-DEBUG] _generate_image_captions (Florence2) result: %r" % ([c[:200] if c else None for c in captions],))
     return captions
 
 

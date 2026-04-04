@@ -5585,8 +5585,7 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
     )
 
     from shared.prompt_enhancer.prompt_enhance_utils import generate_cinematic_prompt
-    logger.info("[PE-DEBUG] process_prompt_enhancer: mode=%r, original_prompts=%r, has_image_start=%r, has_image_refs=%r",
-                prompt_enhancer_mode, original_prompts, image_start is not None, original_image_refs is not None)
+    print("[PE-DEBUG] process_prompt_enhancer: mode=%r, original_prompts=%r, has_image_start=%r, has_image_refs=%r" % (prompt_enhancer_mode, original_prompts, image_start is not None, original_image_refs is not None,))
     prompt_images = []
     if "I" in prompt_enhancer_mode:
         if image_start != None:
@@ -5595,8 +5594,7 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
         if original_image_refs != None:
             prompt_images += original_image_refs[:1]
     prompt_images = [Image.open(img) if isinstance(img,str) else img for img in prompt_images]
-    logger.info("[PE-DEBUG] process_prompt_enhancer: num_prompt_images=%d, 'I' in mode=%r, 'T' in mode=%r",
-                len(prompt_images), "I" in prompt_enhancer_mode, "T" in prompt_enhancer_mode)
+    print("[PE-DEBUG] process_prompt_enhancer: num_prompt_images=%d, 'I' in mode=%r, 'T' in mode=%r" % (len(prompt_images), "I" in prompt_enhancer_mode, "T" in prompt_enhancer_mode,))
     if len(original_prompts) == 0 and "T" not in prompt_enhancer_mode:
         return None
     else:
@@ -5614,9 +5612,8 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
                 post_image_caption_hook = enhancer_offloadobj.unload_all
         prompts_arg = original_prompts if "T" in prompt_enhancer_mode else ["an image"]
         images_arg = prompt_images if len(prompt_images) > 0 else None
-        logger.info("[PE-DEBUG] generate_cinematic_prompt call: prompts_arg=%r, has_images=%r, video_prompt=%r, text_prompt=%r, instructions=%r",
-                    prompts_arg, images_arg is not None, not is_image, audio_only,
-                    (prompt_enhancer_instructions[:150] + '...') if prompt_enhancer_instructions and len(prompt_enhancer_instructions) > 150 else prompt_enhancer_instructions)
+        print("[PE-DEBUG] generate_cinematic_prompt call: prompts_arg=%r, has_images=%r, video_prompt=%r, text_prompt=%r, instructions=%r" % (prompts_arg, images_arg is not None, not is_image, audio_only,
+                    (prompt_enhancer_instructions[:150] + '...') if prompt_enhancer_instructions and len(prompt_enhancer_instructions) > 150 else prompt_enhancer_instructions,))
         prompts = generate_cinematic_prompt(
             prompt_enhancer_image_caption_model,
             prompt_enhancer_image_caption_processor,
@@ -5635,7 +5632,7 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
             post_image_caption_hook = post_image_caption_hook,
             thinking_enabled = "K" in prompt_enhancer_mode,
         )
-        logger.info("[PE-DEBUG] generate_cinematic_prompt result: %r", [p[:200] if p else None for p in prompts] if prompts else None)
+        print("[PE-DEBUG] generate_cinematic_prompt result: %r" % ([p[:200] if p else None for p in prompts] if prompts else None,))
         return prompts
 
 
@@ -5677,8 +5674,7 @@ def exec_prompt_enhancer_engine(state, model_def, prompt_enhancer_modes, origina
     enhanced_prompts = []
     for i, (one_prompt, one_image) in enumerate(zip(original_prompts, image_start)):
         start_images = [one_image] if one_image is not None else None
-        logger.info("[PE-DEBUG] exec_prompt_enhancer_engine iter %d: prompt_enhancer_modes=%r, one_prompt=%r, has_start_image=%r, has_image_refs=%r",
-                    i, prompt_enhancer_modes, one_prompt[:200] if one_prompt else None, one_image is not None, original_image_refs is not None)
+        print("[PE-DEBUG] exec_prompt_enhancer_engine iter %d: prompt_enhancer_modes=%r, one_prompt=%r, has_start_image=%r, has_image_refs=%r" % (i, prompt_enhancer_modes, one_prompt[:200] if one_prompt else None, one_image is not None, original_image_refs is not None,))
         status = f'Please Wait While Enhancing Prompt' if num_prompts==1 else f'Please Wait While Enhancing Prompt #{i+1}'
         progress((i , num_prompts), desc=status, total= num_prompts)
 
@@ -5702,7 +5698,7 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
     model_type = get_state_model_type(state)
     inputs = get_model_settings(state, model_type)
     original_prompts = inputs["prompt"]
-    logger.info("[PE-DEBUG] enhance_prompt called: prompt_enhancer=%r, model_type=%r", prompt_enhancer, model_type)
+    print("[PE-DEBUG] enhance_prompt called: prompt_enhancer=%r, model_type=%r" % (prompt_enhancer, model_type,))
 
     original_prompts, errors = prompt_parser.process_template(original_prompts, keep_comments= True)
     if len(errors) > 0:
@@ -5758,8 +5754,7 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
     model_def = get_model_def(get_state_model_type(state))
     audio_only = model_def.get("audio_only", False)
 
-    logger.info("[PE-DEBUG] enhance_prompt: original_prompts=%r, image_start_types=%r, image_refs=%r, is_image=%r",
-                original_prompts, [type(i).__name__ for i in image_start], type(original_image_refs).__name__, is_image)
+    print("[PE-DEBUG] enhance_prompt: original_prompts=%r, image_start_types=%r, image_refs=%r, is_image=%r" % (original_prompts, [type(i).__name__ for i in image_start], type(original_image_refs).__name__, is_image,))
 
     enhanced_prompts = exec_prompt_enhancer_engine(state, model_def, prompt_enhancer, original_prompts, image_start, original_image_refs, is_image, audio_only, seed, progress, override_profile )
 

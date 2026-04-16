@@ -1,0 +1,8 @@
+{
+  "name": "Prompt From Image",
+  "author": "Gunther Schulz",
+  "version": "1.0.0",
+  "description": "Auto-load prompts from image metadata (Forge/SD WebUI, Wan2GP) when adding start images",
+  "date": "",
+  "wan2gp_version": ""
+}

@@ -8,6 +8,28 @@ from shared.utils.plugins import WAN2GPPlugin
 from shared.gradio.gallery import get_gradio_file_path
 
 
+def _strip_tag_prefix(text):
+    """If text starts with a danbooru-style tag block followed by NL, drop
+    the tag block. Hybrid prompts from sd-webui-prompt-enhancer look like:
+        tag1, tag2, tag3, ...\\n\\ncompositional NL supplement
+    For i2v models, only the NL part is useful — tags describe static
+    attributes already visible in the start image.
+    """
+    if not text:
+        return text
+    paragraphs = text.split("\n\n", 1)
+    if len(paragraphs) < 2 or not paragraphs[1].strip():
+        return text
+    first = paragraphs[0]
+    parts = [p.strip() for p in first.split(",") if p.strip()]
+    if len(parts) < 5:
+        return text
+    avg_len = sum(len(p) for p in parts) / len(parts)
+    if avg_len >= 30:
+        return text
+    return paragraphs[1].strip()
+
+
 def _extract_prompt_from_image(image_path):
     """Extract a text prompt from image metadata.
 
@@ -98,6 +120,7 @@ class PromptFromImagePlugin(WAN2GPPlugin):
                 extracted = _extract_prompt_from_image(path)
                 if not extracted:
                     return gr.update()
+                extracted = _strip_tag_prefix(extracted)
                 gr.Info(f"Loaded prompt from image ({len(extracted.split())} words)")
                 return gr.update(value=extracted)
 

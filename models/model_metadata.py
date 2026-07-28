@@ -72,6 +72,8 @@ def _normalized_choices(choice_def):
             add_choice(label, value)
         else:
             add_choice(labels.get(choice, choice), choice)
+    for key, label in labels.items():
+        add_choice(label, key.replace("V", "").replace("P", ""))
     for value in choice_def.get("selection", []) or []:
         add_choice(labels.get(value, value), value)
     return choices
@@ -87,14 +89,13 @@ def normalize_choice_def(choice_def):
 
 
 def infer_main_outputs(model_def):
-    outputs = []
     if model_def.get("audio_only", False):
         return ["audio"]
     if model_def.get("image_outputs", False):
-        outputs.append("image")
+        return ["image"]
     if model_def.get("v2i_switch_supported", False) or model_def.get("inpaint_support", False):
-        outputs.extend(output for output in ("image", "video") if output not in outputs)
-    return outputs or ["video"]
+        return ["image", "video"]
+    return ["video"]
 
 
 def infer_outputs(model_def):

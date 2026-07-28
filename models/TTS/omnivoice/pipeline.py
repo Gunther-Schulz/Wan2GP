@@ -47,6 +47,7 @@ OMNIVOICE_LEGACY_DEFAULT_VOICE_INSTRUCTION = "female, warm tone, clear articulat
 OMNIVOICE_SIGNATURE_CHUNK_SIZE = 65536
 OMNIVOICE_AUTO_END_TRIM_FLAG = "E"
 OMNIVOICE_AUTO_SPLIT_SETTING_ID = "auto_split_every_s"
+OMNIVOICE_ADJUST_SPEED_SETTING_ID = "adjust_speed_to_max_duration"
 OMNIVOICE_AUTO_SPLIT_MIN_SECONDS = 5.0
 OMNIVOICE_AUTO_SPLIT_MAX_SECONDS = 90.0
 OMNIVOICE_TRAILING_SILENCE_WINDOW_SECONDS = 0.02
@@ -532,6 +533,15 @@ class OmniVoicePipeline:
         value = float(raw_value)
         return value if value > 0 else None
 
+    @staticmethod
+    def _adjust_speed_to_max_duration(custom_settings) -> bool:
+        if not isinstance(custom_settings, dict):
+            return False
+        raw_value = custom_settings.get(OMNIVOICE_ADJUST_SPEED_SETTING_ID, "No")
+        if isinstance(raw_value, bool):
+            return raw_value
+        return str(raw_value or "").strip().lower() == "yes"
+
     def _estimate_text_seconds(self, text: str, voice_clone_prompt: Optional[VoiceClonePrompt]) -> float:
         if voice_clone_prompt is None:
             ref_text = None
@@ -689,6 +699,7 @@ class OmniVoicePipeline:
         voice_clone_prompt: Optional[VoiceClonePrompt],
         instruct: Optional[str],
         generation_config: OmniVoiceGenerationConfig,
+        segment_duration: Optional[float] = None,
     ) -> Optional[tuple[torch.Tensor, object]]:
         if self._abort_requested() or self._early_stop_requested():
             return None
@@ -699,6 +710,7 @@ class OmniVoicePipeline:
                 voice_clone_prompt=voice_clone_prompt,
                 instruct=instruct,
                 generation_config=generation_config,
+                duration=segment_duration,
             )
         except RuntimeError as exc:
             if _is_abort_exception(exc):
@@ -720,6 +732,7 @@ class OmniVoicePipeline:
         generation_config: OmniVoiceGenerationConfig,
         pause_seconds: float,
         duration_seconds: Optional[float],
+        adjust_speed_to_max_duration: bool,
         auto_end_trim: bool,
         callback,
         offloadobj=None,
@@ -731,6 +744,23 @@ class OmniVoicePipeline:
         total_progress_steps = max(1, len(segments) * generation_config.num_step)
         audio_segments = []
         elapsed_samples = 0
+
+        segment_durations: list[Optional[float]] = [None] * len(segments)
+        if adjust_speed_to_max_duration and max_total_samples is not None:
+            total_pause_samples = pause_samples * max(0, len(segments) - 1)
+            speech_budget_samples = max(0, max_total_samples - total_pause_samples)
+            speech_budget_seconds = float(speech_budget_samples) / float(self.sample_rate)
+            segment_estimates: list[float] = []
+            for speaker_id, segment_text in segments:
+                try:
+                    estimate = self._estimate_text_seconds(segment_text, speaker_prompts.get(speaker_id))
+                except Exception:
+                    estimate = 0.0
+                segment_estimates.append(max(1e-6, float(estimate)))
+            estimate_sum = sum(segment_estimates)
+            if estimate_sum > 0:
+                for index, estimate in enumerate(segment_estimates):
+                    segment_durations[index] = max(0.1, speech_budget_seconds * estimate / estimate_sum)
 
         def _poll_early_stop(segment_index: int) -> None:
             if callback is None:
@@ -779,6 +809,7 @@ class OmniVoicePipeline:
                 voice_clone_prompt=speaker_prompts.get(speaker_id),
                 instruct=instruct,
                 generation_config=generation_config,
+                segment_duration=segment_durations[segment_index],
             )
             if segment_result is None:
                 break
@@ -791,8 +822,15 @@ class OmniVoicePipeline:
                 samples_left = max_total_samples - elapsed_samples
                 if samples_left <= 0:
                     break
-                duration_truncated = samples_left < segment_audio.numel()
-                segment_audio = segment_audio[:samples_left]
+                if adjust_speed_to_max_duration:
+                    safety_trim_samples = max(0, int(round(0.5 * self.sample_rate)))
+                    hard_cap = samples_left + safety_trim_samples
+                    if segment_audio.numel() > hard_cap:
+                        duration_truncated = True
+                        segment_audio = segment_audio[:hard_cap]
+                else:
+                    duration_truncated = samples_left < segment_audio.numel()
+                    segment_audio = segment_audio[:samples_left]
             if segment_audio.numel() > 0:
                 if preserve_voice_design and segment_index == 0 and len(segments) > 1:
                     token_result = None if duration_truncated or auto_end_trim else segment_tokens
@@ -824,109 +862,18 @@ class OmniVoicePipeline:
         audio_guide: Optional[str] = None,
         *,
         alt_prompt: Optional[str] = None,
-        image_start=None,
-        image_end=None,
-        input_frames=None,
-        input_frames2=None,
-        input_ref_images=None,
-        input_ref_masks=None,
-        input_masks=None,
-        input_masks2=None,
-        input_video=None,
-        input_faces=None,
-        input_custom=None,
-        denoising_strength=None,
-        masking_strength=None,
-        prefix_frames_count=None,
-        frame_num=None,
-        batch_size=None,
-        height=None,
-        width=None,
-        fit_into_canvas=None,
-        shift=None,
-        sample_solver=None,
         sampling_steps: int = 32,
         guide_scale: float = 2.0,
-        guide2_scale=None,
-        guide3_scale=None,
-        switch_threshold=None,
-        switch2_threshold=None,
-        guide_phases=None,
-        model_switch_phase=None,
-        embedded_guidance_scale=None,
-        n_prompt=None,
         seed: int = -1,
         callback=None,
-        enable_RIFLEx=None,
-        VAE_tile_size=None,
-        joint_pass=None,
-        perturbation_switch=None,
-        perturbation_layers=None,
-        perturbation_start=None,
-        perturbation_end=None,
-        apg_switch=None,
-        cfg_star_switch=None,
-        cfg_zero_step=None,
-        alt_guide_scale=None,
-        audio_cfg_scale=None,
-        input_waveform=None,
-        input_waveform_sample_rate=None,
         audio_guide2: Optional[str] = None,
         audio_prompt_type: str = "",
-        audio_proj=None,
-        audio_scale=None,
-        audio_context_lens=None,
-        context_scale=None,
-        control_scale_alt=None,
-        alt_scale=None,
-        motion_amplitude=None,
-        causal_block_size=None,
-        causal_attention=None,
-        fps=None,
-        overlapped_latents=None,
-        return_latent_slice=None,
-        overlap_noise=None,
-        overlap_size=None,
-        color_correction_strength=None,
-        conditioning_latents_size=None,
-        input_video_is_hdr=None,
-        lora_dir=None,
-        keep_frames_parsed=None,
-        model_filename=None,
-        model_type=None,
-        loras_slists=None,
-        NAG_scale=None,
-        NAG_tau=None,
-        NAG_alpha=None,
-        speakers_bboxes=None,
-        image_mode=None,
-        video_prompt_type=None,
-        window_no=None,
         offloadobj=None,
-        set_header_text=None,
-        pre_video_frame=None,
-        prefix_video=None,
-        original_input_ref_images=None,
-        image_refs_relative_size=None,
-        outpainting_dims=None,
-        face_arc_embeds=None,
         custom_settings=None,
-        temperature: float = 0.0,
-        window_start_frame_no=None,
-        input_video_strength=None,
-        self_refiner_setting=None,
-        self_refiner_plan=None,
-        self_refiner_f_uncertainty=None,
-        self_refiner_certain_percentage=None,
         duration_seconds: Optional[float] = None,
         pause_seconds: float = 0.2,
-        top_p: float = 0.9,
-        top_k: int = 50,
-        set_progress_status=None,
-        loras_selected=None,
-        frames_relative_positions_list=None,
-        frames_to_inject=None,
         verbose_level: int = 0,
+        **kwargs,
     ) -> Optional[dict]:
         self._interrupt = False
         self._early_stop = False
@@ -945,6 +892,7 @@ class OmniVoicePipeline:
         mode = self._normalize_audio_prompt_type(audio_prompt_type)
         auto_end_trim = OMNIVOICE_AUTO_END_TRIM_FLAG in str(audio_prompt_type or "").upper()
         auto_split_seconds = self._resolve_auto_split_seconds(custom_settings)
+        adjust_speed_to_max_duration = self._adjust_speed_to_max_duration(custom_settings)
         language = self._normalize_language(model_mode)
         guide_scale = float(guide_scale if guide_scale is not None else 2.0)
         generation_config = OmniVoiceGenerationConfig(
@@ -986,6 +934,7 @@ class OmniVoicePipeline:
                 generation_config=generation_config,
                 pause_seconds=pause_seconds,
                 duration_seconds=duration_value,
+                adjust_speed_to_max_duration=adjust_speed_to_max_duration,
                 auto_end_trim=auto_end_trim,
                 callback=callback,
                 offloadobj=offloadobj,
@@ -1015,6 +964,7 @@ class OmniVoicePipeline:
             generation_config=generation_config,
             pause_seconds=pause_seconds,
             duration_seconds=duration_value,
+            adjust_speed_to_max_duration=adjust_speed_to_max_duration,
             auto_end_trim=auto_end_trim,
             callback=callback,
             offloadobj=offloadobj,

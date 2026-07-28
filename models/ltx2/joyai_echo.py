@@ -65,6 +65,21 @@ You can combine commands in one bracket, for example `[/duration=8s,/new_shot,/l
 
 [/duration=8s,/new_shot,/load_mem=magician1,magician2,duck1,duck2] ID_A and ID_B are together on the same seaside theater stage. ID_A is still the silver-haired retired magician in the burgundy velvet jacket with the dry theatrical voice and glowing blue card. ID_B is still the small yellow duck inspector in the teal raincoat, spectacles, boots, and serious satchel. The glowing door opens between them onto a miniature harbor full of lantern boats. ID_A says, "I told you the door was shy." ID_B replies, "Shy doors still need permits." Keep both identities, voices, scale difference, readable lip and bill movement, card glow, theater details, tiny waves, and playful overlapping laughter.
 ```
+
+**Prompt Enhancer**
+
+The prompt enhancer works best when your source prompt already describes the story window by window. This gives the enhancer a plan to expand instead of letting it invent disconnected shots. Name the recurring characters and say what should happen in each window.
+
+Example source prompt:
+
+```text
+A warm comic story about a cautious widower who runs a tiny neighborhood restaurant and a confident sailor who fixes boats and hates fancy food.
+- Window 1: show the man alone in his restaurant before opening time, practicing a dinner speech and worrying that the soup is too dramatic.
+- Window 2: show the woman alone on her small boat, repairing a radio and joking that the sea is a terrible sous-chef.
+- Window 3: the man and woman meet in the restaurant during a sudden rainstorm; she brings a broken compass, he serves the dramatic soup, and they argue playfully.
+- Window 4: they travel together on the woman's boat, using the man's soup pot as an improvised compass holder while laughing about their terrible navigation.
+- Window 5: they reach a frozen northern harbor and hold a tiny wedding on the ice, with the soup pot as the ceremonial bell.
+```
 """
 
 JOYAI_ECHO_INFOS = """**JoyAI-Echo**
@@ -664,9 +679,13 @@ def _encode_control_video_slots(model, video_path: str, latent_indices: list[int
         context_start_latent = max(0, int(latent_idx) - 2)
         start_frame = 0 if context_start_latent <= 0 else (context_start_latent - 1) * stride + 1
         end_frame = (int(latent_idx) + 1) * stride
-        frames = decode_video_frames_ffmpeg(video_path, start_frame, max(1, end_frame - start_frame + 1), target_fps=fps, bridge="torch")
+        frame_count = max(1, end_frame - start_frame + 1)
+        frame_count = int(math.ceil(max(0, frame_count - 1) / float(stride))) * stride + 1
+        frames = decode_video_frames_ffmpeg(video_path, start_frame, frame_count, target_fps=fps, bridge="torch")
         if int(frames.shape[0]) == 0:
             continue
+        if (int(frames.shape[0]) - 1) % stride != 0:
+            frames = frames[: ((int(frames.shape[0]) - 1) // stride) * stride + 1]
         local_idx = max(0, min(_pixel_to_latent_index(_latent_center_frame(latent_idx, stride) - start_frame, stride), max(0, int(math.ceil((int(frames.shape[0]) - 1) / stride)))))
         for phase, (phase_height, phase_width) in phase_sizes.items():
             video = load_video_conditioning(frames, height=int(phase_height), width=int(phase_width), frame_cap=None, dtype=model.dtype, device=model.device)
@@ -717,8 +736,7 @@ def build_control_video_memory(model, control_video_path: str, positions_text: s
     return {"video": video, "audio": audio, "names": names}
 
 
-def generate_joyai_echo_window(model, single_shot_generate, **call_args):
-    gen_state = call_args.get("gen_state")
+def prepare_joyai_echo_context(model, gen_state, custom_settings, video_guide, frame_window_options, fps, video_prompt_type, height, width, guide_phases, VAE_tile_size, window_no):
     if not isinstance(gen_state, dict):
         gen_state = {}
     joy_state = gen_state.setdefault("joyai_echo", {})
@@ -731,15 +749,16 @@ def generate_joyai_echo_window(model, single_shot_generate, **call_args):
         )
         joy_state["memory_bank"] = memory_bank
 
-    fps = float(call_args.get("fps", model.model_def.get("fps", 25)) or 25)
-    custom_settings = call_args.get("custom_settings") if isinstance(call_args.get("custom_settings"), dict) else {}
-    control_memory_enabled = "1" in (call_args.get("video_prompt_type", "") or "")
-    control_video_path = call_args.get("video_guide")
-    control_key = (control_video_path, custom_settings.get(JOYAI_CONTROL_MEMORY_SETTING, ""), int(call_args.get("height")), int(call_args.get("width")), int(call_args.get("guide_phases", call_args.get("guidance_phases", 1)) or 1))
+    fps = float(fps or model.model_def.get("fps", 25) or 25)
+    custom_settings = custom_settings if isinstance(custom_settings, dict) else {}
+    control_memory_enabled = "1" in (video_prompt_type or "")
+    control_video_path = video_guide
+    guide_phases = int(guide_phases or 1)
+    control_key = (control_video_path, custom_settings.get(JOYAI_CONTROL_MEMORY_SETTING, ""), int(height), int(width), guide_phases)
     if control_memory_enabled and joy_state.get("control_key") != control_key:
         if not control_video_path:
             raise RuntimeError("JoyAI-Echo Control Video Memory requires the original Control Video path.")
-        target_height, target_width = int(call_args.get("height")), int(call_args.get("width"))
+        target_height, target_width = int(height), int(width)
         target_height = int(math.ceil(target_height / 64) * 64) if target_height % 64 else target_height
         target_width = int(math.ceil(target_width / 64) * 64) if target_width % 64 else target_width
         artificial_memory = build_control_video_memory(
@@ -749,8 +768,8 @@ def generate_joyai_echo_window(model, single_shot_generate, **call_args):
             fps=fps,
             height=target_height,
             width=target_width,
-            two_phase=int(call_args.get("guide_phases", call_args.get("guidance_phases", 1)) or 1) > 1,
-            VAE_tile_size=call_args.get("VAE_tile_size"),
+            two_phase=guide_phases > 1,
+            VAE_tile_size=VAE_tile_size,
         )
         stored, discarded = memory_bank.add_artificial_memory(artificial_memory)
         _debug_memory(f"control video memory stored {len(stored)} slot(s): {_memory_labels_text(stored)}")
@@ -758,12 +777,12 @@ def generate_joyai_echo_window(model, single_shot_generate, **call_args):
             _debug_memory(f"slots {len(discarded)} discarded: {_memory_labels_text(discarded)}")
         joy_state["control_key"] = control_key
 
-    window_options = call_args.get("frame_window_options") if isinstance(call_args.get("frame_window_options"), dict) else {}
+    window_options = frame_window_options if isinstance(frame_window_options, dict) else {}
     model_options = window_options.get("model_options", {}) if isinstance(window_options.get("model_options", {}), dict) else {}
     drop_mem = model_options.get("drop_mem", None)
     if drop_mem is not None:
         dropped = memory_bank.drop(parse_drop_mem_option(drop_mem))
-        print(f"[WAN2GP][JoyAI-Echo] window={call_args.get('window_no', 1)} dropped memories: {_memory_labels_text(dropped)}", flush=True)
+        print(f"[WAN2GP][JoyAI-Echo] window={window_no} dropped memories: {_memory_labels_text(dropped)}", flush=True)
     if "no_mem" in model_options:
         print("[WAN2GP][JoyAI-Echo] /no_mem is deprecated because memories are no longer saved automatically; ignoring it.", flush=True)
     load_mem = model_options.get("load_mem", None)
@@ -785,31 +804,27 @@ def generate_joyai_echo_window(model, single_shot_generate, **call_args):
         "downscale_factor": int(model.model_def.get("joyai_memory_downscale_factor", 1)),
         "return_latents": record_memory,
         "debug_memory": JOYAI_DEBUG_MEMORY,
-        "window_no": call_args.get("window_no", 1),
+        "window_no": window_no,
         "memory_labels": memory_bank.labels(),
     }
-
-    shot_args = dict(call_args)
-    shot_args["joyai_single_window"] = True
-    if control_memory_enabled or "V" in (call_args.get("video_prompt_type", "") or ""):
-        shot_args.update({"input_frames": None, "input_frames2": None, "input_masks": None, "input_masks2": None, "video_prompt_type": ""})
     active_memory_labels = memory_bank.labels()
-    print(f"[WAN2GP][JoyAI-Echo] window={call_args.get('window_no', 1)} loading memories: {_memory_labels_text(active_memory_labels)}", flush=True)
-    with model.pipeline.joyai_echo_context(reference_context):
-        result = single_shot_generate(**shot_args)
-    if result is None:
-        return None
+    print(f"[WAN2GP][JoyAI-Echo] window={window_no} loading memories: {_memory_labels_text(active_memory_labels)}", flush=True)
+    clear_control_inputs = control_memory_enabled or "V" in (video_prompt_type or "")
+    return reference_context, memory_bank, store_mem_selectors, clear_control_inputs
+
+
+def record_joyai_echo_memory(model, result, memory_bank, store_mem_selectors, prefix_frames_count, frame_num, fps, window_no):
     memory_latents = result.pop("_memory_latents", None)
-    if record_memory:
-        trim_frames = max(0, int(call_args.get("prefix_frames_count", 0) or 0))
+    if store_mem_selectors:
+        trim_frames = max(0, int(prefix_frames_count or 0))
         stored, discarded = memory_bank.add_generation(
             model,
-            _trim_memory_latents(model, memory_latents, trim_frames, int(call_args.get("frame_num", 0) or 0)),
-            audio_waveform=_trim_audio_start(result.get("audio"), trim_frames, fps, result.get("audio_sampling_rate")),
+            _trim_memory_latents(model, memory_latents, trim_frames, int(frame_num or 0)),
+            audio_waveform=_trim_audio_start(result.get("audio"), trim_frames, float(fps or model.model_def.get("fps", 25) or 25), result.get("audio_sampling_rate")),
             audio_sample_rate=result.get("audio_sampling_rate"),
             store_selectors=store_mem_selectors,
         )
-        print(f"[WAN2GP][JoyAI-Echo] window={call_args.get('window_no', 1)} recorded memories: {_memory_labels_text(stored)}; total active memories={len(memory_bank)} cached memories={len(memory_bank.cache)}", flush=True)
+        print(f"[WAN2GP][JoyAI-Echo] window={window_no} recorded memories: {_memory_labels_text(stored)}; total active memories={len(memory_bank)} cached memories={len(memory_bank.cache)}", flush=True)
         if discarded:
-            print(f"[WAN2GP][JoyAI-Echo] window={call_args.get('window_no', 1)} discarded memories: {_memory_labels_text(discarded)}", flush=True)
+            print(f"[WAN2GP][JoyAI-Echo] window={window_no} discarded memories: {_memory_labels_text(discarded)}", flush=True)
     return result

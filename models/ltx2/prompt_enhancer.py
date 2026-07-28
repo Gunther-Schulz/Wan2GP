@@ -97,11 +97,15 @@ LTX2_RELAYED_PROMPT = (
     "- Ranges may use percentages. Cover the whole clip from beginning to end without gaps. Use the final open-ended range when useful.\n\n"
     "Output rules:\n"
     "- Output only the final Prompt Relay prompt. Do not include explanations, markdown, headings, bullet lists, or code fences.\n"
-    "- Keep the global prompt concise but specific. Keep each segment one dense sentence or two short sentences.\n"
+    "- Write detailed, specific prompts. LTX-2.3 responds better to rich description than to short prompts, so make the global prompt and each segment vivid, and match the level of detail to the clip length so the action fills the duration instead of rushing.\n"
+    "- Keep the global prompt specific. Write each segment as one to three dense sentences of visible action.\n"
+    "- Write in present tense, describing the action as it unfolds.\n"
+    "- Use physical cues, not emotional labels: describe what the character does (a tightening jaw, lowered eyes, a step back), not what they feel.\n"
     "- Preserve the user's intent, characters, setting, language, spoken words, and ending. Do not invent a different story.\n"
     "- If the user includes speech, keep spoken words in double quotes and place them in the segment where they should be heard.\n"
+    "- Describe audio when relevant: the ambient sound bed, room tone, music, or specific sound events, alongside any speech.\n"
     "- Make transitions continuous. Do not create unrelated shots unless the user asks for cuts or a montage.\n"
-    "- Avoid generic filler. Use concrete physical action and cinematic details that can be generated.\n\n"
+    "- Avoid generic filler, contradictory directions, readable on-screen text or logos, chaotic physics, and scenes overloaded with many characters. Use concrete physical action and cinematic details that can be generated.\n\n"
     "Example output:\n"
     "Epic cinematic fantasy battle, a lone armored knight faces a massive black dragon in a ruined mountain keep at dusk, smoke, sparks, torn banners, dramatic firelight, handheld low-angle camera, high detail, coherent action continuity.\n"
     "[0%:25%] The knight raises a dented shield as the dragon lands among broken stones, wings throwing dust across the courtyard, embers swirling around both figures.\n"
@@ -121,17 +125,55 @@ LTX2_RELAYED_IMAGE_PROMPT = (
     "- Ranges may use percentages. Cover the whole clip from beginning to end without gaps. Use the final open-ended range when useful.\n\n"
     "Output rules:\n"
     "- Output only the final Prompt Relay prompt. Do not include explanations, markdown, headings, bullet lists, or code fences.\n"
-    "- Keep the global prompt concise but specific. Keep each segment one dense sentence or two short sentences.\n"
+    "- Write detailed, specific prompts. LTX-2.3 responds better to rich description than to short prompts, so make the global prompt and each segment vivid, and match the level of detail to the clip length so the action fills the duration instead of rushing.\n"
+    "- Keep the global prompt specific. Write each segment as one to three dense sentences of visible action.\n"
+    "- Write in present tense, describing the action as it unfolds.\n"
+    "- Use physical cues, not emotional labels: describe what the character does (a tightening jaw, lowered eyes, a step back), not what they feel.\n"
     "- Preserve the user's intent, characters, setting, language, spoken words, and ending. Do not invent a different story.\n"
     "- If the user includes speech, keep spoken words in double quotes and place them in the segment where they should be heard.\n"
+    "- Describe audio when relevant: the ambient sound bed, room tone, music, or specific sound events, alongside any speech.\n"
+    "- For image-to-video, focus on motion and change; do not re-describe static elements already visible in the start image.\n"
     "- Make transitions continuous from the start image. Do not introduce sudden identity, wardrobe, environment, or camera changes unless requested.\n"
-    "- Avoid generic filler. Use concrete physical action and cinematic details that can be generated.\n\n"
+    "- Avoid generic filler, contradictory directions, readable on-screen text or logos, chaotic physics, and scenes overloaded with many characters. Use concrete physical action and cinematic details that can be generated.\n\n"
     "Example output:\n"
     "A cinematic continuation from the provided start image, preserving the visible subject identity, clothing, environment, lighting, framing, and color palette; realistic motion, stable character consistency, detailed facial expression, smooth camera movement.\n"
     "[0%:25%] The subject holds the starting pose for a moment, then slowly turns toward the main action while the camera begins a subtle push-in and the background remains consistent with the image.\n"
     "[25%:50%] The subject steps forward with natural body motion, reacts to the off-screen event with a focused expression, and says \"This is where the story changes.\"\n"
     "[50%:75%] The camera tracks alongside the subject as wind moves hair and clothing in the same style as the image, with lighting and shadows staying stable.\n"
     "[75%:] The subject reaches the final mark, pauses in a clear finishing pose, and the scene resolves without changing identity, wardrobe, or location."
+)
+
+LTX2_STANDARD_PROMPT = (
+    "You are an expert cinematic prompt writer for LTX-2 in WanGP. Rewrite the user prompt into one enhanced video prompt.\n\n"
+    "Output rules:\n"
+    "- Output only the final prompt as a single flowing paragraph. Do not include explanations, markdown, headings, bold text, bullet lists, code fences, or a shot list. Never label parts as \"Shot 1\", \"Shot 2\", etc.\n"
+    "- Write detailed, specific description. LTX-2.3 responds better to rich description than to short prompts, so match the level of detail to the clip length so the action fills the duration instead of rushing.\n"
+    "- Write in present tense and describe the visible action in chronological order, starting directly with the action.\n"
+    "- Cover, in order: the main action, the subject's appearance, movements and gestures, the setting and background, camera framing and movement, and lighting and color.\n"
+    "- Use physical cues, not emotional labels: describe what the character does (a tightening jaw, lowered eyes, a step back), not what they feel.\n"
+    "- Describe audio when relevant: the ambient sound bed, room tone, music, or specific sound events. If the user includes speech, keep spoken words in double quotes.\n"
+    "- Preserve the user's intent, characters, setting, language, spoken words, and ending. Do not invent a different story.\n"
+    "- Avoid contradictory directions, readable on-screen text or logos, chaotic physics, and scenes overloaded with many characters.\n\n"
+    "Example input: a mechanic fixing a motorcycle\n"
+    "Example output:\n"
+    "A grizzled mechanic in an oil-stained jumpsuit crouches beside a vintage motorcycle in a dim garage, wiping his hands on a rag before leaning in to tighten a bolt with a slow, deliberate turn of the wrench as his brow furrows. The camera tracks low in a slow arc around the front wheel, shallow focus holding the chrome detailing while a bare overhead bulb throws hard amber light and long shadows across the concrete floor. The clink of tools, a faint radio hum, and the occasional drip of oil fill the still air."
+)
+
+LTX2_STANDARD_IMAGE_PROMPT = (
+    "You are an expert cinematic prompt writer for LTX-2 in WanGP. Rewrite the user prompt and image caption into one enhanced video prompt.\n\n"
+    "Use the image caption as the source of truth for visible identity, subject count, clothing, composition, environment, lighting, and style. "
+    "If the user text conflicts with the image caption, preserve the image identity and scene setup while following the user's requested action, mood, and story.\n\n"
+    "Output rules:\n"
+    "- Output only the final prompt as a single flowing paragraph. Do not include explanations, markdown, headings, bold text, bullet lists, code fences, or a shot list. Never label parts as \"Shot 1\", \"Shot 2\", etc.\n"
+    "- Write detailed, specific description. LTX-2.3 responds better to rich description than to short prompts, so match the level of detail to the clip length so the action fills the duration instead of rushing.\n"
+    "- Write in present tense and describe the visible action in chronological order, starting directly with the action.\n"
+    "- Focus on motion and change; do not re-describe static elements already visible in the start image. Keep identity, wardrobe, environment, and camera continuous from the image unless the user requests a change.\n"
+    "- Use physical cues, not emotional labels: describe what the character does, not what they feel.\n"
+    "- Describe audio when relevant: the ambient sound bed, room tone, music, or specific sound events. If the user includes speech, keep spoken words in double quotes.\n"
+    "- Preserve the user's intent, characters, setting, language, spoken words, and ending. Do not invent a different story.\n"
+    "- Avoid contradictory directions, readable on-screen text or logos, chaotic physics, and scenes overloaded with many characters.\n\n"
+    "Example output:\n"
+    "The woman from the image slowly raises the pink flower toward her face and breathes in, her shoulders settling as a soft smile forms while the same loose strands of hair drift in a light breeze. The camera begins a gentle push-in as the blurred meadow and warm side light stay consistent with the image, and a faint rustle of grass with distant birdsong fills the air."
 )
 
 LTX2_PROMPT_INFOS = """
@@ -141,7 +183,10 @@ LTX2_PROMPT_INFOS = """
 
 - Describe the subject, setting, action, camera, lighting, mood, and visual style in concrete cinematic language.
 - Keep identity, wardrobe, location, and chronology stable unless you intentionally want a transition.
-- Write the visible action in temporal order. LTX2 usually behaves better when it can follow a clear sequence instead of a pile of disconnected tags.
+- Write the visible action in temporal order, in present tense. LTX2 usually behaves better when it can follow a clear sequence instead of a pile of disconnected tags.
+- Write detailed prompts. LTX-2.3 favors richer description over short prompts; match the amount of detail to the clip length so longer clips have enough to fill the duration.
+- Use physical cues instead of emotional labels: show what a character does (a clenched hand, a slow exhale) rather than naming the feeling.
+- Describe the audio when it matters: ambient sound, room tone, or music alongside any spoken lines.
 - Put spoken words in double quotes and include who says them, when they are said, and the visible mouth or body action that supports them.
 - For better clarity, use multiline prompts in **How to Process each Line of the Text Prompt**. Use one line per shot, beat, character action, or generated item depending on the selected line-processing mode.
 

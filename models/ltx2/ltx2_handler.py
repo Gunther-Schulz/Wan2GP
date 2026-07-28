@@ -437,6 +437,12 @@ class family_handler:
                     "image_prompt_types_allowed": "TSV",
                     "prompt_infos": JOYAI_ECHO_PROMPT_INFOS,
                     "prompt_enhancer_def": {"selection": ["TM", "TIM"], "labels": {"TM": "A JoyAI-Echo multi-shot prompt using existing Text Prompt", "TIM": "A JoyAI-Echo multi-shot prompt using existing Text Prompt and Start Image"}, "default": ""},
+                    "text_prompt_enhancer_instructions": JOYAI_ECHO_PROMPT_ENHANCER,
+                    "video_prompt_enhancer_instructions": JOYAI_ECHO_PROMPT_ENHANCER,
+                    "image_prompt_enhancer_instructions": JOYAI_ECHO_PROMPT_ENHANCER,
+                    "text_prompt_enhancer_max_tokens": 1536,
+                    "video_prompt_enhancer_max_tokens": 1536,
+                    "image_prompt_enhancer_max_tokens": 1536,
                     "text_prompt_enhancer_instructions1": JOYAI_ECHO_PROMPT_ENHANCER,
                     "video_prompt_enhancer_instructions1": JOYAI_ECHO_PROMPT_ENHANCER,
                     "image_prompt_enhancer_instructions1": JOYAI_ECHO_PROMPT_ENHANCER,
@@ -448,7 +454,7 @@ class family_handler:
                 }
             )
         else:
-            from .prompt_enhancer import LTX2_PROMPT_INFOS, LTX2_RELAYED_IMAGE_PROMPT, LTX2_RELAYED_PROMPT
+            from .prompt_enhancer import LTX2_PROMPT_INFOS, LTX2_RELAYED_IMAGE_PROMPT, LTX2_RELAYED_PROMPT, LTX2_STANDARD_IMAGE_PROMPT, LTX2_STANDARD_PROMPT
 
             audio_prompt_selection = ["", "A", "K"] if editanything_ref and not distilled else ["", "A", "K", "2", "A1OF"]
             audio_prompt_labels = {
@@ -489,12 +495,18 @@ class family_handler:
                         },
                         "default": "",
                     },
+                    "text_prompt_enhancer_instructions": LTX2_STANDARD_PROMPT,
+                    "video_prompt_enhancer_instructions": LTX2_STANDARD_IMAGE_PROMPT,
+                    "image_prompt_enhancer_instructions": LTX2_STANDARD_IMAGE_PROMPT,
+                    "text_prompt_enhancer_max_tokens": 1536,
+                    "video_prompt_enhancer_max_tokens": 1536,
+                    "image_prompt_enhancer_max_tokens": 1536,
                     "text_prompt_enhancer_instructions1": LTX2_RELAYED_PROMPT,
                     "video_prompt_enhancer_instructions1": LTX2_RELAYED_IMAGE_PROMPT,
                     "image_prompt_enhancer_instructions1": LTX2_RELAYED_IMAGE_PROMPT,
-                    "text_prompt_enhancer_max_tokens1": 1024,
-                    "video_prompt_enhancer_max_tokens1": 1024,
-                    "image_prompt_enhancer_max_tokens1": 1024,
+                    "text_prompt_enhancer_max_tokens1": 1536,
+                    "video_prompt_enhancer_max_tokens1": 1536,
+                    "image_prompt_enhancer_max_tokens1": 1536,
                     "audio_guide_window_slicing": True,
                     "video_length_not_limited_by_audio": True,
                     "output_audio_is_input_audio": True,
